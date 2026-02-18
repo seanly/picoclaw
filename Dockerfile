@@ -20,11 +20,14 @@ RUN make build
 # ============================================================
 FROM alpine:3.23
 
-RUN apk add --no-cache ca-certificates tzdata curl
+RUN apk add --no-cache ca-certificates tzdata curl busybox-extras bash
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget -q --spider http://localhost:18790/health || exit 1
+# ca-certificates, tzdata, tini (init for zombie reaping when running as PID 1)
+RUN apk add --no-cache ca-certificates tzdata && \
+    apk add --no-cache tini --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
 
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
@@ -39,5 +42,6 @@ USER picoclaw
 # Run onboard to create initial directories and config
 RUN /usr/local/bin/picoclaw onboard
 
-ENTRYPOINT ["picoclaw"]
+# tini as PID 1: reaps zombies, forwards signals to process group (-g)
+ENTRYPOINT ["tini", "-g", "--", "picoclaw"]
 CMD ["gateway"]

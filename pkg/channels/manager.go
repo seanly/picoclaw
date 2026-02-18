@@ -176,6 +176,19 @@ func (m *Manager) initChannels() error {
 		}
 	}
 
+	if m.config.Channels.BotsChat.Enabled && m.config.Channels.BotsChat.CloudURL != "" && m.config.Channels.BotsChat.PairingToken != "" {
+		logger.DebugC("channels", "Attempting to initialize BotsChat channel")
+		botschat, err := NewBotsChatChannel(m.config.Channels.BotsChat, m.bus)
+		if err != nil {
+			logger.ErrorCF("channels", "Failed to initialize BotsChat channel", map[string]interface{}{
+				"error": err.Error(),
+			})
+		} else {
+			m.channels["botschat"] = botschat
+			logger.InfoC("channels", "BotsChat channel enabled successfully")
+		}
+	}
+
 	logger.InfoCF("channels", "Channel initialization completed", map[string]interface{}{
 		"enabled_channels": len(m.channels),
 	})

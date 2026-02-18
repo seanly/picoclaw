@@ -162,6 +162,16 @@ type ChannelsConfig struct {
 	Slack    SlackConfig    `json:"slack"`
 	LINE     LINEConfig     `json:"line"`
 	OneBot   OneBotConfig   `json:"onebot"`
+	BotsChat BotsChatConfig `json:"botschat"`
+}
+
+type BotsChatConfig struct {
+	Enabled      bool                `json:"enabled" env:"PICOCLAW_CHANNELS_BOTSCHAT_ENABLED"`
+	CloudURL     string              `json:"cloud_url" env:"PICOCLAW_CHANNELS_BOTSCHAT_CLOUD_URL"`
+	PairingToken string              `json:"pairing_token" env:"PICOCLAW_CHANNELS_BOTSCHAT_PAIRING_TOKEN"`
+	AccountID    string              `json:"account_id" env:"PICOCLAW_CHANNELS_BOTSCHAT_ACCOUNT_ID"`
+	E2EPassword  string              `json:"e2e_password" env:"PICOCLAW_CHANNELS_BOTSCHAT_E2E_PASSWORD"`
+	AllowFrom    FlexibleStringSlice `json:"allow_from" env:"PICOCLAW_CHANNELS_BOTSCHAT_ALLOW_FROM"`
 }
 
 type WhatsAppConfig struct {
@@ -398,6 +408,14 @@ func DefaultConfig() *Config {
 				ReconnectInterval:  5,
 				GroupTriggerPrefix: []string{},
 				AllowFrom:          FlexibleStringSlice{},
+			},
+			BotsChat: BotsChatConfig{
+				Enabled:      false,
+				CloudURL:     "",
+				PairingToken: "",
+				AccountID:    "default",
+				E2EPassword:  "",
+				AllowFrom:    FlexibleStringSlice{},
 			},
 		},
 		Providers: ProvidersConfig{

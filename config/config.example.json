@@ -70,6 +70,14 @@
       "reconnect_interval": 5,
       "group_trigger_prefix": [],
       "allow_from": []
+    },
+    "botschat": {
+      "enabled": false,
+      "cloud_url": "https://console.botschat.app",
+      "pairing_token": "bc_pat_xxx",
+      "account_id": "default",
+      "e2e_password": "",
+      "allow_from": []
     }
   },
   "providers": {
