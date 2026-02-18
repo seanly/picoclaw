@@ -139,6 +139,14 @@
       "webhook_path": "/webhook/wecom-app",
       "allow_from": [],
       "reply_timeout": 5
+    },
+    "botschat": {
+      "enabled": false,
+      "cloud_url": "https://console.botschat.app",
+      "pairing_token": "bc_pat_xxx",
+      "account_id": "default",
+      "e2e_password": "",
+      "allow_from": []
     }
   },
   "providers": {
