@@ -176,6 +176,7 @@ func (m *Manager) initChannels() error {
 		}
 	}
 
+	// Initialize WeCom Channel
 	if m.config.Channels.WeCom.Enabled && m.config.Channels.WeCom.Token != "" {
 		logger.DebugC("channels", "Attempting to initialize WeCom channel")
 		wecom, err := NewWeComBotChannel(m.config.Channels.WeCom, m.bus)
@@ -189,6 +190,7 @@ func (m *Manager) initChannels() error {
 		}
 	}
 
+	// Initialize WeCom App Channel
 	if m.config.Channels.WeComApp.Enabled && m.config.Channels.WeComApp.CorpID != "" {
 		logger.DebugC("channels", "Attempting to initialize WeCom App channel")
 		wecomApp, err := NewWeComAppChannel(m.config.Channels.WeComApp, m.bus)
@@ -202,6 +204,7 @@ func (m *Manager) initChannels() error {
 		}
 	}
 
+	// Initialize BotsChat Channel
 	if m.config.Channels.BotsChat.Enabled && m.config.Channels.BotsChat.CloudURL != "" && m.config.Channels.BotsChat.PairingToken != "" {
 		logger.DebugC("channels", "Attempting to initialize BotsChat channel")
 		botschat, err := NewBotsChatChannel(m.config.Channels.BotsChat, m.bus)
