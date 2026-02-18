@@ -192,6 +192,16 @@ type ChannelsConfig struct {
 	OneBot   OneBotConfig   `json:"onebot"`
 	WeCom    WeComConfig    `json:"wecom"`
 	WeComApp WeComAppConfig `json:"wecom_app"`
+	BotsChat BotsChatConfig `json:"botschat"`
+}
+
+type BotsChatConfig struct {
+	Enabled      bool                `json:"enabled" env:"PICOCLAW_CHANNELS_BOTSCHAT_ENABLED"`
+	CloudURL     string              `json:"cloud_url" env:"PICOCLAW_CHANNELS_BOTSCHAT_CLOUD_URL"`
+	PairingToken string              `json:"pairing_token" env:"PICOCLAW_CHANNELS_BOTSCHAT_PAIRING_TOKEN"`
+	AccountID    string              `json:"account_id" env:"PICOCLAW_CHANNELS_BOTSCHAT_ACCOUNT_ID"`
+	E2EPassword  string              `json:"e2e_password" env:"PICOCLAW_CHANNELS_BOTSCHAT_E2E_PASSWORD"`
+	AllowFrom    FlexibleStringSlice `json:"allow_from" env:"PICOCLAW_CHANNELS_BOTSCHAT_ALLOW_FROM"`
 }
 
 type WhatsAppConfig struct {
@@ -476,6 +486,7 @@ type ClawHubRegistryConfig struct {
 	Timeout         int    `json:"timeout"           env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_TIMEOUT"`
 	MaxZipSize      int    `json:"max_zip_size"      env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_MAX_ZIP_SIZE"`
 	MaxResponseSize int    `json:"max_response_size" env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_MAX_RESPONSE_SIZE"`
+}
 }
 
 func LoadConfig(path string) (*Config, error) {
