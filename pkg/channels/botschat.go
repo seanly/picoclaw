@@ -325,6 +325,23 @@ func (c *BotsChatChannel) handleUserMessage(msg map[string]interface{}) {
 	if sessionKey == "" {
 		sessionKey = userId
 	}
+	// Publish with SessionKey when BotsChat sends agent-scoped keys (e.g. agent:memskill:botschat:userId:adhoc)
+	// so each BotsChat chat gets its own conversation history instead of sharing agent:main:main.
+	if strings.HasPrefix(sessionKey, "agent:") {
+		imb := bus.InboundMessage{
+			Channel:    c.Name(),
+			SenderID:   userId,
+			ChatID:     sessionKey,
+			Content:    text,
+			Media:      nil,
+			SessionKey: sessionKey,
+			Metadata:   metadata,
+		}
+		if c.IsAllowed(userId) {
+			c.bus.PublishInbound(imb)
+		}
+		return
+	}
 	c.HandleMessage(userId, sessionKey, text, nil, metadata)
 }
 

@@ -10,6 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +38,7 @@ type AgentLoop struct {
 	state          *state.Manager
 	running        atomic.Bool
 	summarizing    sync.Map
+	reflectAt      sync.Map // sessionKey -> last message count when reflection ran
 	fallback       *providers.FallbackChain
 	channelManager *channels.Manager
 }
@@ -422,6 +426,12 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		al.maybeSummarize(agent, opts.SessionKey, opts.Channel, opts.ChatID)
 	}
 
+	// 7b. Optional: long-term memory compress (async, rate-limited)
+	al.maybeCompressLongTerm(agent)
+
+	// 7c. Optional: evolution reflection and policy update (when enabled, rate-limited)
+	al.maybeReflectAndUpdate(agent, opts)
+
 	// 8. Optional: send response via bus
 	if opts.SendResponse {
 		al.bus.PublishOutbound(bus.OutboundMessage{
@@ -697,9 +707,15 @@ func (al *AgentLoop) updateToolContexts(agent *AgentInstance, channel, chatID st
 func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, chatID string) {
 	newHistory := agent.Sessions.GetHistory(sessionKey)
 	tokenEstimate := al.estimateTokens(newHistory)
-	threshold := agent.ContextWindow * 75 / 100
+	msgThreshold := DefaultSessionSummaryMessageThreshold
+	tokenPct := DefaultSessionSummaryTokenPercent
+	if agent.MemoryPolicy != nil {
+		msgThreshold = agent.MemoryPolicy.SessionSummaryMessageThreshold()
+		tokenPct = agent.MemoryPolicy.SessionSummaryTokenPercent()
+	}
+	threshold := agent.ContextWindow * tokenPct / 100
 
-	if len(newHistory) > 20 || tokenEstimate > threshold {
+	if len(newHistory) > msgThreshold || tokenEstimate > threshold {
 		summarizeKey := agent.ID + ":" + sessionKey
 		if _, loading := al.summarizing.LoadOrStore(summarizeKey, true); !loading {
 			go func() {
@@ -721,7 +737,11 @@ func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, c
 // It drops the oldest 50% of messages (keeping system prompt and last user message).
 func (al *AgentLoop) forceCompression(agent *AgentInstance, sessionKey string) {
 	history := agent.Sessions.GetHistory(sessionKey)
-	if len(history) <= 4 {
+	minKeep := DefaultSessionSummaryKeepCount
+	if agent.MemoryPolicy != nil && agent.MemoryPolicy.SessionSummaryKeepCount() > 0 {
+		minKeep = agent.MemoryPolicy.SessionSummaryKeepCount()
+	}
+	if len(history) <= minKeep {
 		return
 	}
 
@@ -864,12 +884,18 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 	history := agent.Sessions.GetHistory(sessionKey)
 	summary := agent.Sessions.GetSummary(sessionKey)
 
-	// Keep last 4 messages for continuity
-	if len(history) <= 4 {
+	keepCount := DefaultSessionSummaryKeepCount
+	if agent.MemoryPolicy != nil {
+		keepCount = agent.MemoryPolicy.SessionSummaryKeepCount()
+	}
+	if keepCount <= 0 {
+		keepCount = DefaultSessionSummaryKeepCount
+	}
+	if len(history) <= keepCount {
 		return
 	}
 
-	toSummarize := history[:len(history)-4]
+	toSummarize := history[:len(history)-keepCount]
 
 	// Oversized Message Guard
 	maxMessageTokens := agent.ContextWindow / 2
@@ -922,8 +948,134 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 
 	if finalSummary != "" {
 		agent.Sessions.SetSummary(sessionKey, finalSummary)
-		agent.Sessions.TruncateHistory(sessionKey, 4)
+		agent.Sessions.TruncateHistory(sessionKey, keepCount)
 		agent.Sessions.Save(sessionKey)
+	}
+}
+
+// lastLongTermCompressFile returns the path to the file storing last long-term compress timestamp.
+func lastLongTermCompressFile(workspace string) string {
+	return filepath.Join(workspace, "memory", ".last_longterm_compress")
+}
+
+// maybeCompressLongTerm runs long-term memory compression when over threshold (async, max once per 24h).
+func (al *AgentLoop) maybeCompressLongTerm(agent *AgentInstance) {
+	if agent.MemoryPolicy == nil || agent.MemoryPolicy.LongTermCompressCharThreshold() <= 0 {
+		return
+	}
+	store := agent.ContextBuilder.GetMemoryStore()
+	if store == nil {
+		return
+	}
+	content := store.ReadLongTerm()
+	if len(content) <= agent.MemoryPolicy.LongTermCompressCharThreshold() {
+		return
+	}
+	stampFile := lastLongTermCompressFile(agent.Workspace)
+	if data, err := os.ReadFile(stampFile); err == nil {
+		if ts, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil {
+			if time.Since(time.Unix(ts, 0)) < 24*time.Hour {
+				return
+			}
+		}
+	}
+	go al.runLongTermCompress(agent, store, content, stampFile)
+}
+
+func (al *AgentLoop) runLongTermCompress(agent *AgentInstance, store *MemoryStore, content, stampFile string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	prompt := `Summarize and compress the following long-term memory into a shorter form. Preserve all key facts, names, dates, and important details. Keep the same markdown structure (headings, lists) where useful. Output only the compressed memory content.`
+
+	resp, err := agent.Provider.Chat(ctx, []providers.Message{
+		{Role: "user", Content: prompt + "\n\n---\n\n" + content},
+	}, nil, agent.Model, map[string]interface{}{
+		"max_tokens":  4096,
+		"temperature": 0.2,
+	})
+	if err != nil {
+		logger.WarnCF("agent", "Long-term memory compress failed", map[string]interface{}{"error": err.Error()})
+		return
+	}
+	compressed := strings.TrimSpace(resp.Content)
+	if compressed == "" {
+		return
+	}
+	if err := store.WriteLongTerm(compressed); err != nil {
+		logger.WarnCF("agent", "Long-term memory write after compress failed", map[string]interface{}{"error": err.Error()})
+		return
+	}
+	memDir := filepath.Dir(stampFile)
+	os.MkdirAll(memDir, 0755)
+	_ = os.WriteFile(stampFile, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0644)
+	logger.InfoCF("agent", "Long-term memory compressed", map[string]interface{}{
+		"before": len(content),
+		"after":  len(compressed),
+	})
+}
+
+// reflectionTriggerInterval is the number of messages between evolution reflection runs.
+const reflectionTriggerInterval = 20
+
+// maybeReflectAndUpdate runs reflection and policy update when evolution is enabled (async, every N messages).
+func (al *AgentLoop) maybeReflectAndUpdate(agent *AgentInstance, opts processOptions) {
+	if agent.MemoryPolicy == nil || !agent.MemoryPolicy.EvolutionEnabled() {
+		return
+	}
+	history := agent.Sessions.GetHistory(opts.SessionKey)
+	n := len(history)
+	if n < reflectionTriggerInterval {
+		return
+	}
+	key := opts.SessionKey
+	last, _ := al.reflectAt.Load(key)
+	lastCount, _ := last.(int)
+	// Trigger when we've crossed a multiple of reflectionTriggerInterval
+	if (n/reflectionTriggerInterval)*reflectionTriggerInterval <= lastCount {
+		return
+	}
+	al.reflectAt.Store(key, (n/reflectionTriggerInterval)*reflectionTriggerInterval)
+	go al.runReflection(agent, opts, history)
+}
+
+func (al *AgentLoop) runReflection(agent *AgentInstance, opts processOptions, history []providers.Message) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Build recent conversation snippet (last 10 messages)
+	start := len(history) - 10
+	if start < 0 {
+		start = 0
+	}
+	var sb strings.Builder
+	for i := start; i < len(history); i++ {
+		m := history[i]
+		if m.Role != "user" && m.Role != "assistant" {
+			continue
+		}
+		sb.WriteString(m.Role + ": " + utils.Truncate(m.Content, 500) + "\n")
+	}
+	policyDesc := fmt.Sprintf("Current: retrieve_limit=%d, recent_days=%d, session_summary_message_threshold=%d, session_summary_token_percent=%d, session_summary_keep_count=%d",
+		agent.MemoryPolicy.RetrieveLimit(), agent.MemoryPolicy.RecentDays(),
+		agent.MemoryPolicy.SessionSummaryMessageThreshold(), agent.MemoryPolicy.SessionSummaryTokenPercent(),
+		agent.MemoryPolicy.SessionSummaryKeepCount())
+
+	prompt := `Based on the recent conversation and current memory policy, suggest small adjustments to improve memory behavior. Output only a JSON object with the keys you want to change (e.g. {"retrieve_limit": 15, "recent_days": 5}). Use integer values. If no change is needed, output {}.`
+
+	resp, err := agent.Provider.Chat(ctx, []providers.Message{
+		{Role: "user", Content: "Recent conversation:\n" + sb.String() + "\n" + policyDesc + "\n\n" + prompt},
+	}, nil, agent.Model, map[string]interface{}{
+		"max_tokens":  512,
+		"temperature": 0.2,
+	})
+	if err != nil {
+		logger.DebugCF("agent", "Reflection LLM failed", map[string]interface{}{"error": err.Error()})
+		return
+	}
+	store := agent.ContextBuilder.GetMemoryStore()
+	if err := UpdateFromReflection(agent.Workspace, store, strings.TrimSpace(resp.Content)); err != nil {
+		logger.WarnCF("agent", "UpdateFromReflection failed", map[string]interface{}{"error": err.Error()})
 	}
 }
 

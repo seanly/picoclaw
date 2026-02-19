@@ -14,11 +14,20 @@ import (
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
+// MemoryContextOpts holds parameters for memory retrieval (recent days, retrieve limit).
+// When nil, defaults are used (3 days, limit 10).
+type MemoryContextOpts struct {
+	RecentDays    int
+	RetrieveLimit int
+}
+
 type ContextBuilder struct {
-	workspace    string
-	skillsLoader *skills.SkillsLoader
-	memory       *MemoryStore
-	tools        *tools.ToolRegistry // Direct reference to tool registry
+	workspace     string
+	skillsLoader  *skills.SkillsLoader
+	memory        *MemoryStore
+	tools         *tools.ToolRegistry // Direct reference to tool registry
+	memoryOpts    *MemoryContextOpts
+	memoryPolicy  MemoryPolicy
 }
 
 func getGlobalConfigDir() string {
@@ -46,6 +55,22 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 // SetToolsRegistry sets the tools registry for dynamic tool summary generation.
 func (cb *ContextBuilder) SetToolsRegistry(registry *tools.ToolRegistry) {
 	cb.tools = registry
+}
+
+// SetMemoryOpts sets memory context options (recent days, retrieve limit). Nil uses defaults.
+// Ignored when SetMemoryPolicy is used.
+func (cb *ContextBuilder) SetMemoryOpts(opts *MemoryContextOpts) {
+	cb.memoryOpts = opts
+}
+
+// SetMemoryPolicy sets the full memory policy. When non-nil, overrides memory opts for retrieve params.
+func (cb *ContextBuilder) SetMemoryPolicy(policy MemoryPolicy) {
+	cb.memoryPolicy = policy
+}
+
+// GetMemoryStore returns the memory store for backup/compress and tools.
+func (cb *ContextBuilder) GetMemoryStore() *MemoryStore {
+	return cb.memory
 }
 
 func (cb *ContextBuilder) getIdentity() string {
@@ -106,7 +131,9 @@ func (cb *ContextBuilder) buildToolsSection() string {
 	return sb.String()
 }
 
-func (cb *ContextBuilder) BuildSystemPrompt() string {
+// BuildSystemPrompt builds the system prompt. memoryQuery is the current user message (or session summary)
+// used for query-based memory retrieval; empty string uses full long-term + recent days fallback.
+func (cb *ContextBuilder) BuildSystemPrompt(memoryQuery string) string {
 	parts := []string{}
 
 	// Core identity section
@@ -128,10 +155,22 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 %s`, skillsSummary))
 	}
 
-	// Memory context
-	memoryContext := cb.memory.GetMemoryContext()
+	// Memory context (query-based when memoryQuery non-empty)
+	recentDays, retrieveLimit := DefaultRecentDays, DefaultRetrieveLimit
+	if cb.memoryPolicy != nil {
+		recentDays = cb.memoryPolicy.RecentDays()
+		retrieveLimit = cb.memoryPolicy.RetrieveLimit()
+	} else if cb.memoryOpts != nil {
+		if cb.memoryOpts.RecentDays > 0 {
+			recentDays = cb.memoryOpts.RecentDays
+		}
+		if cb.memoryOpts.RetrieveLimit > 0 {
+			retrieveLimit = cb.memoryOpts.RetrieveLimit
+		}
+	}
+	memoryContext := cb.memory.GetMemoryContext(memoryQuery, recentDays, retrieveLimit)
 	if memoryContext != "" {
-		parts = append(parts, "# Memory\n\n"+memoryContext)
+		parts = append(parts, memoryContext)
 	}
 
 	// Join with "---" separator
@@ -160,7 +199,8 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 func (cb *ContextBuilder) BuildMessages(history []providers.Message, summary string, currentMessage string, media []string, channel, chatID string) []providers.Message {
 	messages := []providers.Message{}
 
-	systemPrompt := cb.BuildSystemPrompt()
+	// Use current user message as memory query for relevant retrieval
+	systemPrompt := cb.BuildSystemPrompt(currentMessage)
 
 	// Add Current Session info if provided
 	if channel != "" && chatID != "" {
