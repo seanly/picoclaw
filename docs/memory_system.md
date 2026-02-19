@@ -52,6 +52,8 @@ Memory 系统分为三层：
 | `session_summary_message_threshold` | 会话消息数超过此值触发摘要 | 20 |
 | `session_summary_token_percent` | 会话 token 占 context 比例超过此值触发摘要 | 75 |
 | `session_summary_keep_count` | 摘要后保留的最近消息条数 | 4 |
+| `session_relevant_history_limit` | 按 query 检索时最多保留的相关轮数；0=关闭按需注入 | 0 |
+| `session_relevant_fallback_keep` | 无相关轮时回退保留的最近消息条数；0=不注入任何 history；省略=8 | 8 |
 | `long_term_compress_char_threshold` | MEMORY.md 字符数超过此值触发压缩（0=不压缩） | 0 |
 | `evolution_enabled` | 是否开启评估/反思/策略更新 | false |
 
