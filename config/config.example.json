@@ -263,6 +263,10 @@
   },
   "gateway": {
     "host": "0.0.0.0",
-    "port": 18790
+    "port": 18790,
+    "openai_api": {
+      "enabled": false,
+      "bearer_tokens": []
+    }
   }
 }

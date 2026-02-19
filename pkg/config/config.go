@@ -439,9 +439,16 @@ func (c *ModelConfig) Validate() error {
 	return nil
 }
 
+// GatewayOpenAIAPIConfig configures the OpenAI-compatible POST /v1/chat/completions endpoint.
+type GatewayOpenAIAPIConfig struct {
+	Enabled      bool     `json:"enabled" env:"PICOCLAW_GATEWAY_OPENAI_API_ENABLED"`
+	BearerTokens []string `json:"bearer_tokens" env:"PICOCLAW_GATEWAY_OPENAI_API_BEARER_TOKENS"`
+}
+
 type GatewayConfig struct {
-	Host string `json:"host" env:"PICOCLAW_GATEWAY_HOST"`
-	Port int    `json:"port" env:"PICOCLAW_GATEWAY_PORT"`
+	Host      string                  `json:"host" env:"PICOCLAW_GATEWAY_HOST"`
+	Port      int                     `json:"port" env:"PICOCLAW_GATEWAY_PORT"`
+	OpenAIAPI GatewayOpenAIAPIConfig `json:"openai_api,omitempty"`
 }
 
 type BraveConfig struct {
