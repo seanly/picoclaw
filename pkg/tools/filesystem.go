@@ -129,12 +129,19 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 }
 
 type WriteFileTool struct {
-	workspace string
-	restrict  bool
+	workspace          string
+	restrict           bool
+	onMemoryMEMORYWrite func(content string) error // when set, write to memory/MEMORY.md is redirected to this append
 }
 
 func NewWriteFileTool(workspace string, restrict bool) *WriteFileTool {
 	return &WriteFileTool{workspace: workspace, restrict: restrict}
+}
+
+// SetOnMemoryMEMORYWrite sets a callback for writes to memory/MEMORY.md. When path is memory/MEMORY.md,
+// the tool calls this instead of overwriting the file, so long-term memory stays append-only and format-consistent.
+func (t *WriteFileTool) SetOnMemoryMEMORYWrite(fn func(content string) error) {
+	t.onMemoryMEMORYWrite = fn
 }
 
 func (t *WriteFileTool) Name() string {
@@ -176,6 +183,18 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 	resolvedPath, err := validatePath(path, t.workspace, t.restrict)
 	if err != nil {
 		return ErrorResult(err.Error())
+	}
+
+	// Redirect write to memory/MEMORY.md into append with format normalization (no overwrite).
+	if t.onMemoryMEMORYWrite != nil {
+		absWorkspace, _ := filepath.Abs(t.workspace)
+		rel, relErr := filepath.Rel(absWorkspace, resolvedPath)
+		if relErr == nil && filepath.ToSlash(rel) == "memory/MEMORY.md" {
+			if err := t.onMemoryMEMORYWrite(content); err != nil {
+				return ErrorResult(fmt.Sprintf("failed to append to long-term memory: %v", err))
+			}
+			return NewToolResult("Appended to long-term memory (memory/MEMORY.md).")
+		}
 	}
 
 	dir := filepath.Dir(resolvedPath)

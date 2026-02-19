@@ -57,15 +57,18 @@ type Config struct {
 	Tools     ToolsConfig     `json:"tools"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Devices   DevicesConfig   `json:"devices"`
+	Memory    *MemoryConfig   `json:"memory,omitempty"`
+	mu        sync.RWMutex
 }
 
 // MarshalJSON implements custom JSON marshaling for Config
-// to omit providers section when empty and session when empty
+// to omit providers section when empty, session when empty, and memory when nil
 func (c Config) MarshalJSON() ([]byte, error) {
 	type Alias Config
 	aux := &struct {
 		Providers *ProvidersConfig `json:"providers,omitempty"`
 		Session   *SessionConfig   `json:"session,omitempty"`
+		Memory    *MemoryConfig    `json:"memory,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(&c),
@@ -81,7 +84,24 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		aux.Session = &c.Session
 	}
 
+	// Only include memory if not nil
+	if c.Memory != nil {
+		aux.Memory = c.Memory
+	}
+
 	return json.Marshal(aux)
+}
+
+// MemoryConfig holds memory (MemSkill) policy parameters.
+// Used for retrieve fallback, session summary, long-term compress, and evolution.
+type MemoryConfig struct {
+	RetrieveLimit                 int  `json:"retrieve_limit,omitempty"`                   // max chunks for query-based retrieval; 0 = default 10
+	RecentDays                    int  `json:"recent_days,omitempty"`                       // days of daily notes when no query; 0 = default 3
+	SessionSummaryMessageThreshold int  `json:"session_summary_message_threshold,omitempty"` // trigger summary when history exceeds this; 0 = default 20
+	SessionSummaryTokenPercent    int  `json:"session_summary_token_percent,omitempty"`     // or when tokens exceed this % of context; 0 = default 75
+	SessionSummaryKeepCount       int  `json:"session_summary_keep_count,omitempty"`       // keep last N messages after summary; 0 = default 4
+	LongTermCompressCharThreshold int  `json:"long_term_compress_char_threshold,omitempty"` // compress MEMORY.md when over this length; 0 = off
+	EvolutionEnabled              bool `json:"evolution_enabled,omitempty"`                 // enable eval/reflect/update (Phase 4)
 }
 
 type AgentsConfig struct {
