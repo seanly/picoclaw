@@ -24,17 +24,21 @@ type MemoryPolicy interface {
 	SessionSummaryMessageThreshold() int
 	SessionSummaryTokenPercent() int
 	SessionSummaryKeepCount() int
+	SessionRelevantHistoryLimit() int   // max turns for query-based session history; 0 = disabled
+	SessionRelevantFallbackKeep() int   // fallback last N messages when no match; 0 = no history when no match, nil/omit = 8
 	LongTermCompressCharThreshold() int
 	EvolutionEnabled() bool
 }
 
 // Default memory policy constants (match current PicoClaw behavior).
 const (
-	DefaultRetrieveLimit                 = 10
-	DefaultRecentDays                    = 3
+	DefaultRetrieveLimit                  = 10
+	DefaultRecentDays                     = 3
 	DefaultSessionSummaryMessageThreshold = 20
-	DefaultSessionSummaryTokenPercent    = 75
-	DefaultSessionSummaryKeepCount      = 4
+	DefaultSessionSummaryTokenPercent     = 75
+	DefaultSessionSummaryKeepCount        = 4
+	DefaultSessionRelevantHistoryLimit    = 0  // 0 = feature off
+	DefaultSessionRelevantFallbackKeep    = 8
 )
 
 // policyOverridesPath returns workspace/memory/policy_overrides.json.
@@ -44,13 +48,15 @@ func policyOverridesPath(workspace string) string {
 
 // PolicyOverrides is a subset of memory config for workspace overrides (from reflection).
 type PolicyOverrides struct {
-	RetrieveLimit                 *int  `json:"retrieve_limit,omitempty"`
-	RecentDays                    *int  `json:"recent_days,omitempty"`
+	RetrieveLimit                  *int  `json:"retrieve_limit,omitempty"`
+	RecentDays                     *int  `json:"recent_days,omitempty"`
 	SessionSummaryMessageThreshold *int  `json:"session_summary_message_threshold,omitempty"`
-	SessionSummaryTokenPercent    *int  `json:"session_summary_token_percent,omitempty"`
-	SessionSummaryKeepCount       *int  `json:"session_summary_keep_count,omitempty"`
-	LongTermCompressCharThreshold *int  `json:"long_term_compress_char_threshold,omitempty"`
-	EvolutionEnabled              *bool `json:"evolution_enabled,omitempty"`
+	SessionSummaryTokenPercent     *int  `json:"session_summary_token_percent,omitempty"`
+	SessionSummaryKeepCount        *int  `json:"session_summary_keep_count,omitempty"`
+	SessionRelevantHistoryLimit   *int `json:"session_relevant_history_limit,omitempty"`
+	SessionRelevantFallbackKeep   *int `json:"session_relevant_fallback_keep,omitempty"`
+	LongTermCompressCharThreshold *int `json:"long_term_compress_char_threshold,omitempty"`
+	EvolutionEnabled               *bool `json:"evolution_enabled,omitempty"`
 }
 
 func loadOverrides(workspace string) *PolicyOverrides {
@@ -69,12 +75,14 @@ func loadOverrides(workspace string) *PolicyOverrides {
 // PolicyFromConfig returns a MemoryPolicy from config and optional workspace overrides. Nil cfg uses defaults.
 func PolicyFromConfig(cfg *config.MemoryConfig, workspace string) MemoryPolicy {
 	p := &policyImpl{
-		retrieveLimit:                 DefaultRetrieveLimit,
-		recentDays:                    DefaultRecentDays,
+		retrieveLimit:                  DefaultRetrieveLimit,
+		recentDays:                     DefaultRecentDays,
 		sessionSummaryMessageThreshold: DefaultSessionSummaryMessageThreshold,
-		sessionSummaryTokenPercent:    DefaultSessionSummaryTokenPercent,
-		sessionSummaryKeepCount:       DefaultSessionSummaryKeepCount,
-		longTermCompressCharThreshold:  0,
+		sessionSummaryTokenPercent:     DefaultSessionSummaryTokenPercent,
+		sessionSummaryKeepCount:        DefaultSessionSummaryKeepCount,
+		sessionRelevantHistoryLimit:    DefaultSessionRelevantHistoryLimit,
+		sessionRelevantFallbackKeep:    DefaultSessionRelevantFallbackKeep,
+		longTermCompressCharThreshold: 0,
 		evolutionEnabled:              false,
 	}
 	if cfg != nil {
@@ -83,6 +91,10 @@ func PolicyFromConfig(cfg *config.MemoryConfig, workspace string) MemoryPolicy {
 		p.sessionSummaryMessageThreshold = cfg.SessionSummaryMessageThreshold
 		p.sessionSummaryTokenPercent = cfg.SessionSummaryTokenPercent
 		p.sessionSummaryKeepCount = cfg.SessionSummaryKeepCount
+		p.sessionRelevantHistoryLimit = cfg.SessionRelevantHistoryLimit
+		if cfg.SessionRelevantFallbackKeep != nil {
+			p.sessionRelevantFallbackKeep = *cfg.SessionRelevantFallbackKeep
+		}
 		p.longTermCompressCharThreshold = cfg.LongTermCompressCharThreshold
 		p.evolutionEnabled = cfg.EvolutionEnabled
 	}
@@ -104,6 +116,12 @@ func PolicyFromConfig(cfg *config.MemoryConfig, workspace string) MemoryPolicy {
 			if o.SessionSummaryKeepCount != nil {
 				p.sessionSummaryKeepCount = *o.SessionSummaryKeepCount
 			}
+			if o.SessionRelevantHistoryLimit != nil {
+				p.sessionRelevantHistoryLimit = *o.SessionRelevantHistoryLimit
+			}
+			if o.SessionRelevantFallbackKeep != nil {
+				p.sessionRelevantFallbackKeep = *o.SessionRelevantFallbackKeep
+			}
 			if o.LongTermCompressCharThreshold != nil {
 				p.longTermCompressCharThreshold = *o.LongTermCompressCharThreshold
 			}
@@ -118,24 +136,28 @@ func PolicyFromConfig(cfg *config.MemoryConfig, workspace string) MemoryPolicy {
 // DefaultPolicy returns a MemoryPolicy with all defaults (full fallback, no evolution).
 func DefaultPolicy() MemoryPolicy {
 	return &policyImpl{
-		retrieveLimit:                 DefaultRetrieveLimit,
-		recentDays:                    DefaultRecentDays,
+		retrieveLimit:                  DefaultRetrieveLimit,
+		recentDays:                     DefaultRecentDays,
 		sessionSummaryMessageThreshold: DefaultSessionSummaryMessageThreshold,
-		sessionSummaryTokenPercent:    DefaultSessionSummaryTokenPercent,
-		sessionSummaryKeepCount:       DefaultSessionSummaryKeepCount,
-		longTermCompressCharThreshold:  0,
+		sessionSummaryTokenPercent:     DefaultSessionSummaryTokenPercent,
+		sessionSummaryKeepCount:        DefaultSessionSummaryKeepCount,
+		sessionRelevantHistoryLimit:    DefaultSessionRelevantHistoryLimit,
+		sessionRelevantFallbackKeep:    DefaultSessionRelevantFallbackKeep,
+		longTermCompressCharThreshold: 0,
 		evolutionEnabled:              false,
 	}
 }
 
 type policyImpl struct {
-	retrieveLimit                 int
-	recentDays                    int
+	retrieveLimit                  int
+	recentDays                     int
 	sessionSummaryMessageThreshold int
-	sessionSummaryTokenPercent    int
-	sessionSummaryKeepCount       int
-	longTermCompressCharThreshold int
-	evolutionEnabled              bool
+	sessionSummaryTokenPercent     int
+	sessionSummaryKeepCount        int
+	sessionRelevantHistoryLimit    int
+	sessionRelevantFallbackKeep    int
+	longTermCompressCharThreshold  int
+	evolutionEnabled               bool
 }
 
 func (p *policyImpl) RetrieveLimit() int {
@@ -171,6 +193,14 @@ func (p *policyImpl) SessionSummaryKeepCount() int {
 		return DefaultSessionSummaryKeepCount
 	}
 	return p.sessionSummaryKeepCount
+}
+
+func (p *policyImpl) SessionRelevantHistoryLimit() int {
+	return p.sessionRelevantHistoryLimit
+}
+
+func (p *policyImpl) SessionRelevantFallbackKeep() int {
+	return p.sessionRelevantFallbackKeep
 }
 
 func (p *policyImpl) LongTermCompressCharThreshold() int {
@@ -229,6 +259,12 @@ func mergeOverrides(dst, src *PolicyOverrides) {
 	if src.SessionSummaryKeepCount != nil {
 		dst.SessionSummaryKeepCount = src.SessionSummaryKeepCount
 	}
+	if src.SessionRelevantHistoryLimit != nil {
+		dst.SessionRelevantHistoryLimit = src.SessionRelevantHistoryLimit
+	}
+	if src.SessionRelevantFallbackKeep != nil {
+		dst.SessionRelevantFallbackKeep = src.SessionRelevantFallbackKeep
+	}
 	if src.LongTermCompressCharThreshold != nil {
 		dst.LongTermCompressCharThreshold = src.LongTermCompressCharThreshold
 	}
@@ -270,6 +306,10 @@ func parseReflectionToOverrides(s string) *PolicyOverrides {
 					o.SessionSummaryTokenPercent = &n
 				case "session_summary_keep_count":
 					o.SessionSummaryKeepCount = &n
+				case "session_relevant_history_limit":
+					o.SessionRelevantHistoryLimit = &n
+				case "session_relevant_fallback_keep":
+					o.SessionRelevantFallbackKeep = &n
 				case "long_term_compress_char_threshold":
 					o.LongTermCompressCharThreshold = &n
 				}
@@ -284,6 +324,7 @@ func parseReflectionToOverrides(s string) *PolicyOverrides {
 	// Return nil if nothing parsed
 	if o.RetrieveLimit == nil && o.RecentDays == nil && o.SessionSummaryMessageThreshold == nil &&
 		o.SessionSummaryTokenPercent == nil && o.SessionSummaryKeepCount == nil &&
+		o.SessionRelevantHistoryLimit == nil && o.SessionRelevantFallbackKeep == nil &&
 		o.LongTermCompressCharThreshold == nil && o.EvolutionEnabled == nil {
 		return nil
 	}

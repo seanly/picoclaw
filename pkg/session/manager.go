@@ -111,6 +111,20 @@ func (sm *SessionManager) GetSummary(key string) string {
 	return session.Summary
 }
 
+// GetRelevantHistory returns history relevant to query (turn-based selection)
+// and the session summary. When limit <= 0, returns full history and summary
+// (caller should use GetHistory + GetSummary instead when feature is disabled).
+// When fallbackKeep is 0 and no relevant turns match, returns empty history.
+func (sm *SessionManager) GetRelevantHistory(key, query string, limit, fallbackKeep int) ([]providers.Message, string) {
+	full := sm.GetHistory(key)
+	summary := sm.GetSummary(key)
+	if limit <= 0 {
+		return full, summary
+	}
+	historyForContext := GetRelevantHistory(full, summary, query, limit, fallbackKeep)
+	return historyForContext, summary
+}
+
 func (sm *SessionManager) SetSummary(key string, summary string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

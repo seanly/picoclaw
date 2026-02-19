@@ -154,7 +154,11 @@
     "recent_days": 3,
     "session_summary_message_threshold": 20,
     "session_summary_token_percent": 75,
-    "session_summary_keep_count": 4
+    "session_summary_keep_count": 4,
+    "session_relevant_history_limit": 0,
+    "session_relevant_fallback_keep": 8,
+    "long_term_compress_char_threshold": 0,
+    "evolution_enabled": false
   },
   "gateway": {
     "host": "0.0.0.0",

@@ -388,8 +388,18 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	var history []providers.Message
 	var summary string
 	if !opts.NoHistory {
-		history = agent.Sessions.GetHistory(opts.SessionKey)
-		summary = agent.Sessions.GetSummary(opts.SessionKey)
+		relevantLimit := 0
+		fallbackKeep := 8
+		if agent.MemoryPolicy != nil && agent.MemoryPolicy.SessionRelevantHistoryLimit() > 0 {
+			relevantLimit = agent.MemoryPolicy.SessionRelevantHistoryLimit()
+			fallbackKeep = agent.MemoryPolicy.SessionRelevantFallbackKeep()
+		}
+		if relevantLimit > 0 {
+			history, summary = agent.Sessions.GetRelevantHistory(opts.SessionKey, opts.UserMessage, relevantLimit, fallbackKeep)
+		} else {
+			history = agent.Sessions.GetHistory(opts.SessionKey)
+			summary = agent.Sessions.GetSummary(opts.SessionKey)
+		}
 	}
 	messages := agent.ContextBuilder.BuildMessages(
 		history,
