@@ -31,6 +31,7 @@ type AgentInstance struct {
 	Subagents      *config.SubagentsConfig
 	SkillsFilter   []string
 	Candidates     []providers.FallbackCandidate
+	MemoryPolicy   MemoryPolicy
 }
 
 // NewAgentInstance creates an agent instance from config.
@@ -49,7 +50,8 @@ func NewAgentInstance(
 	restrict := defaults.RestrictToWorkspace
 	toolsRegistry := tools.NewToolRegistry()
 	toolsRegistry.Register(tools.NewReadFileTool(workspace, restrict))
-	toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict))
+	wft := tools.NewWriteFileTool(workspace, restrict)
+	toolsRegistry.Register(wft)
 	toolsRegistry.Register(tools.NewListDirTool(workspace, restrict))
 	toolsRegistry.Register(tools.NewExecToolWithConfig(workspace, restrict, cfg))
 	toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict))
@@ -60,6 +62,30 @@ func NewAgentInstance(
 
 	contextBuilder := NewContextBuilder(workspace)
 	contextBuilder.SetToolsRegistry(toolsRegistry)
+	memoryPolicy := PolicyFromConfig(cfg.Memory, workspace)
+	contextBuilder.SetMemoryPolicy(memoryPolicy)
+
+	// Memory tools (MemSkill): search and append; ensure MEMORY.md format via normalization and write_file redirect
+	memStore := contextBuilder.GetMemoryStore()
+	appendLongTerm := func(content string) error {
+		normalized := NormalizeLongTermEntry(content)
+		if normalized == "" {
+			return nil
+		}
+		cur := memStore.ReadLongTerm()
+		if cur != "" {
+			cur += "\n\n"
+		}
+		return memStore.WriteLongTerm(cur + normalized)
+	}
+	wft.SetOnMemoryMEMORYWrite(appendLongTerm)
+	toolsRegistry.Register(tools.NewMemorySearchTool(memStore.Retrieve))
+	toolsRegistry.Register(tools.NewMemoryAppendTool(func(content, slot string) error {
+		if slot == "today" {
+			return memStore.AppendToday(content)
+		}
+		return appendLongTerm(content)
+	}))
 
 	agentID := routing.DefaultAgentID
 	agentName := ""
@@ -112,6 +138,7 @@ func NewAgentInstance(
 		Subagents:      subagents,
 		SkillsFilter:   skillsFilter,
 		Candidates:     candidates,
+		MemoryPolicy:   memoryPolicy,
 	}
 }
 

@@ -250,6 +250,13 @@
     "enabled": false,
     "monitor_usb": true
   },
+  "memory": {
+    "retrieve_limit": 10,
+    "recent_days": 3,
+    "session_summary_message_threshold": 20,
+    "session_summary_token_percent": 75,
+    "session_summary_keep_count": 4
+  },
   "gateway": {
     "host": "0.0.0.0",
     "port": 18790
