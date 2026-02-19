@@ -11,6 +11,7 @@ import (
 
 type Server struct {
 	server    *http.Server
+	mux       *http.ServeMux
 	mu        sync.RWMutex
 	ready     bool
 	checks    map[string]Check
@@ -33,6 +34,7 @@ type StatusResponse struct {
 func NewServer(host string, port int) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
+		mux:       mux,
 		ready:     false,
 		checks:    make(map[string]Check),
 		startTime: time.Now(),
@@ -50,6 +52,11 @@ func NewServer(host string, port int) *Server {
 	}
 
 	return s
+}
+
+// RegisterRoute adds an extra route to the server mux. Must be called before Start().
+func (s *Server) RegisterRoute(pattern string, handler http.Handler) {
+	s.mux.Handle(pattern, handler)
 }
 
 func (s *Server) Start() error {

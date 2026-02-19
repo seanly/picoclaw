@@ -33,6 +33,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/heartbeat"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/migrate"
+	"github.com/sipeed/picoclaw/pkg/openaiapi"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
@@ -665,6 +666,10 @@ func gatewayCmd() {
 	}
 
 	healthServer := health.NewServer(cfg.Gateway.Host, cfg.Gateway.Port)
+	if cfg.Gateway.OpenAIAPI.Enabled {
+		healthServer.RegisterRoute("/v1/chat/completions", openaiapi.NewHandler(cfg, agentLoop))
+		fmt.Printf("✓ OpenAI-compatible API enabled at POST http://%s:%d/v1/chat/completions\n", cfg.Gateway.Host, cfg.Gateway.Port)
+	}
 	go func() {
 		if err := healthServer.Start(); err != nil && err != http.ErrServerClosed {
 			logger.ErrorCF("health", "Health server error", map[string]interface{}{"error": err.Error()})
