@@ -218,7 +218,7 @@ workspace/
 
 2. **session_summary_message_threshold**
    - 将 `session_summary_message_threshold` 设为 5（仅测试用），连续发多轮短消息，总条数超过 5。
-   - 观察是否出现「Memory threshold reached. Optimizing conversation history...」或类似提示，且后续对话仍能继续，说明会话摘要触发与保留条数受策略控制。
+   - 观察是否出现「Session history is long. Summarizing conversation...」或类似提示，且后续对话仍能继续，说明会话摘要触发与保留条数受策略控制。
 
 3. **evolution_enabled 与 policy_overrides**
    - 将 `evolution_enabled` 设为 `true`，进行约 20 条消息的对话。
