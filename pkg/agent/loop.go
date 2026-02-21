@@ -734,7 +734,7 @@ func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, c
 					al.bus.PublishOutbound(bus.OutboundMessage{
 						Channel: channel,
 						ChatID:  chatID,
-						Content: "Memory threshold reached. Optimizing conversation history...",
+						Content: "Session history is long. Summarizing conversation...",
 					})
 				}
 				al.summarizeSession(agent, sessionKey)
