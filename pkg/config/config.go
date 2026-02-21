@@ -59,17 +59,26 @@ type Config struct {
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Devices   DevicesConfig   `json:"devices"`
 	Memory    *MemoryConfig   `json:"memory,omitempty"`
+	Observation *ObservationConfig `json:"observation,omitempty"`
 	mu        sync.RWMutex
 }
 
+// ObservationConfig configures the agent observability layer (prompts, responses, memory/session handling).
+type ObservationConfig struct {
+	Enabled           bool   `json:"enabled,omitempty"`
+	Path              string `json:"path,omitempty"`               // directory for JSONL output; empty = ~/.picoclaw/observe
+	IncludeFullPrompt bool   `json:"include_full_prompt,omitempty"` // if true, store full system+messages; else lengths/preview only
+}
+
 // MarshalJSON implements custom JSON marshaling for Config
-// to omit providers section when empty, session when empty, and memory when nil
+// to omit providers section when empty, session when empty, memory when nil, observation when nil.
 func (c Config) MarshalJSON() ([]byte, error) {
 	type Alias Config
 	aux := &struct {
-		Providers *ProvidersConfig `json:"providers,omitempty"`
-		Session   *SessionConfig   `json:"session,omitempty"`
-		Memory    *MemoryConfig    `json:"memory,omitempty"`
+		Providers   *ProvidersConfig   `json:"providers,omitempty"`
+		Session     *SessionConfig     `json:"session,omitempty"`
+		Memory      *MemoryConfig      `json:"memory,omitempty"`
+		Observation *ObservationConfig `json:"observation,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(&c),
@@ -88,6 +97,10 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	// Only include memory if not nil
 	if c.Memory != nil {
 		aux.Memory = c.Memory
+	}
+
+	if c.Observation != nil {
+		aux.Observation = c.Observation
 	}
 
 	return json.Marshal(aux)
@@ -566,6 +579,18 @@ func SaveConfig(path string, cfg *Config) error {
 
 func (c *Config) WorkspacePath() string {
 	return expandHome(c.Agents.Defaults.Workspace)
+}
+
+// ObservationDir returns the directory for observation JSONL output, or "" if observation is disabled.
+func (c *Config) ObservationDir() string {
+	if c.Observation == nil || !c.Observation.Enabled {
+		return ""
+	}
+	p := c.Observation.Path
+	if p == "" {
+		p = "~/.picoclaw/observe"
+	}
+	return expandHome(p)
 }
 
 func (c *Config) GetAPIKey() string {

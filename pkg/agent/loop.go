@@ -26,6 +26,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/agent/observe"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -42,6 +43,7 @@ type AgentLoop struct {
 	reflectAt      sync.Map // sessionKey -> last message count when reflection ran
 	fallback       *providers.FallbackChain
 	channelManager *channels.Manager
+	observer       observe.Observer // optional; set when config observation enabled
 }
 
 // processOptions configures how a message is processed
@@ -73,6 +75,12 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		stateManager = state.NewManager(defaultAgent.Workspace)
 	}
 
+	var obs observe.Observer
+	if dir := cfg.ObservationDir(); dir != "" {
+		includeFull := cfg.Observation != nil && cfg.Observation.IncludeFullPrompt
+		obs = observe.NewFileObserver(dir, includeFull)
+	}
+
 	return &AgentLoop{
 		bus:         msgBus,
 		cfg:         cfg,
@@ -80,6 +88,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		state:       stateManager,
 		summarizing: sync.Map{},
 		fallback:    fallbackChain,
+		observer:    obs,
 	}
 }
 
@@ -423,6 +432,26 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 			summary = agent.Sessions.GetSummary(opts.SessionKey)
 		}
 	}
+
+	sessionMode := "full"
+	relevantLimit, fallbackKeep := 0, 8
+	if !opts.NoHistory && agent.MemoryPolicy != nil && agent.MemoryPolicy.SessionRelevantHistoryLimit() > 0 {
+		relevantLimit = agent.MemoryPolicy.SessionRelevantHistoryLimit()
+		fallbackKeep = agent.MemoryPolicy.SessionRelevantFallbackKeep()
+		sessionMode = "relevant"
+	}
+	if al.observer != nil {
+		al.observer.OnTurnStart(observe.TurnStartEvent{
+			Common:        observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
+			UserMessage:   opts.UserMessage,
+			SessionMode:   sessionMode,
+			HistoryCount:  len(history),
+			SummaryLength: len(summary),
+			RelevantLimit: relevantLimit,
+			FallbackKeep:  fallbackKeep,
+		})
+	}
+
 	messages := agent.ContextBuilder.BuildMessages(
 		history,
 		summary,
@@ -431,6 +460,29 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		opts.Channel,
 		opts.ChatID,
 	)
+
+	// Observation: memory used for this turn (same params as in BuildSystemPrompt)
+	if al.observer != nil {
+		recentDays, retrieveLimit := DefaultRecentDays, DefaultRetrieveLimit
+		if agent.MemoryPolicy != nil {
+			recentDays = agent.MemoryPolicy.RecentDays()
+			retrieveLimit = agent.MemoryPolicy.RetrieveLimit()
+		}
+		memoryContext := agent.ContextBuilder.GetMemoryStore().GetMemoryContext(opts.UserMessage, recentDays, retrieveLimit)
+		memorySource := "full"
+		if opts.UserMessage != "" {
+			memorySource = "retrieve"
+		}
+		al.observer.OnMemoryUsed(observe.MemoryUsedEvent{
+			Common:                observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
+			MemoryQuery:           opts.UserMessage,
+			RecentDays:            recentDays,
+			RetrieveLimit:         retrieveLimit,
+			MemorySource:          memorySource,
+			MemoryContextLength:   len(memoryContext),
+			MemoryContextPreview:  memoryContext,
+		})
+	}
 
 	// 3. Save user message to session
 	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
@@ -483,6 +535,15 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 			"final_length": len(finalContent),
 		})
 
+	if al.observer != nil {
+		al.observer.OnTurnEnd(observe.TurnEndEvent{
+			Common:               observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
+			FinalContentLength:   len(finalContent),
+			FinalContentPreview:  finalContent,
+			TotalIterations:      iteration,
+		})
+	}
+
 	return finalContent, nil
 }
 
@@ -529,6 +590,27 @@ func (al *AgentLoop) runLLMIteration(
 				"messages_json": formatMessagesForLog(messages),
 				"tools_json":    formatToolsForLog(providerToolDefs),
 			})
+
+		systemPromptLen := 0
+		if len(messages) > 0 {
+			systemPromptLen = len(messages[0].Content)
+		}
+		if al.observer != nil {
+			reqEv := observe.LLMRequestEvent{
+				Common:             observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
+				Iteration:          iteration,
+				Model:              agent.Model,
+				MessagesCount:      len(messages),
+				SystemPromptLength: systemPromptLen,
+				ToolsCount:         len(providerToolDefs),
+			}
+			if fo, ok := al.observer.(*observe.FileObserver); ok && fo.IncludeFullPrompt() {
+				if b, err := json.Marshal(messages); err == nil {
+					reqEv.MessagesJSON = string(b)
+				}
+			}
+			al.observer.OnLLMRequest(reqEv)
+		}
 
 		// Call LLM with fallback chain if candidates are configured.
 		var response *providers.LLMResponse
@@ -608,6 +690,24 @@ func (al *AgentLoop) runLLMIteration(
 					"error":     err.Error(),
 				})
 			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
+		}
+
+		if al.observer != nil {
+			toolSummaries := make([]observe.ToolCallSummary, 0, len(response.ToolCalls))
+			for _, tc := range response.ToolCalls {
+				argsPreview := ""
+				if tc.Function != nil {
+					argsPreview = utils.Truncate(tc.Function.Arguments, 300)
+				}
+				toolSummaries = append(toolSummaries, observe.ToolCallSummary{Name: tc.Name, ArgsPreview: argsPreview})
+			}
+			al.observer.OnLLMResponse(observe.LLMResponseEvent{
+				Common:          observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
+				Iteration:       iteration,
+				ContentLength:   len(response.Content),
+				ContentPreview:  response.Content,
+				ToolCalls:       toolSummaries,
+			})
 		}
 
 		// Check if no tool calls - we're done
@@ -737,6 +837,20 @@ func (al *AgentLoop) runLLMIteration(
 
 			// Save tool result message to session
 			agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
+
+			errStr := ""
+			if toolResult.Err != nil {
+				errStr = toolResult.Err.Error()
+			}
+			if al.observer != nil {
+				al.observer.OnToolExecuted(observe.ToolExecutedEvent{
+					Common:               observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
+					ToolName:             tc.Name,
+					ArgsPreview:          argsPreview,
+					ResultForLLMLength:   len(contentForLLM),
+					Error:                errStr,
+				})
+			}
 		}
 	}
 
