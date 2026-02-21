@@ -271,7 +271,8 @@
     "port": 18790,
     "openai_api": {
       "enabled": false,
-      "bearer_tokens": []
+      "bearer_tokens": [],
+      "model_scope": "global"
     }
   }
 }

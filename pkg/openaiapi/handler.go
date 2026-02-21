@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,18 +23,36 @@ const (
 // AgentProcessDirect is the minimal interface needed to handle a chat completion.
 type AgentProcessDirect interface {
 	ProcessDirect(ctx context.Context, content, sessionKey string) (string, error)
+	// ProcessDirectWithModelName runs a completion using the given model_name (from model_list) when non-empty.
+	ProcessDirectWithModelName(ctx context.Context, content, sessionKey, modelName string) (string, error)
 }
 
 // Handler implements http.Handler for POST /v1/chat/completions.
+// Model selection follows config model_scope: "session" (per-session stored model) or "global" (single stored model for all).
 type Handler struct {
-	cfg        *config.Config
-	agentLoop  AgentProcessDirect
+	cfg          *config.Config
+	agentLoop    AgentProcessDirect
+	modelMu      sync.RWMutex
+	sessionModel map[string]string // sessionKey -> model_name (when model_scope == "session")
+	globalModel  string            // when model_scope == "global"
 }
 
 // NewHandler returns an HTTP handler for the OpenAI-compatible chat completions endpoint.
 // Caller must only register it when cfg.Gateway.OpenAIAPI.Enabled is true.
 func NewHandler(cfg *config.Config, agentLoop AgentProcessDirect) *Handler {
-	return &Handler{cfg: cfg, agentLoop: agentLoop}
+	return &Handler{
+		cfg:          cfg,
+		agentLoop:    agentLoop,
+		sessionModel: make(map[string]string),
+	}
+}
+
+func (h *Handler) modelScope() string {
+	s := strings.TrimSpace(strings.ToLower(h.cfg.Gateway.OpenAIAPI.ModelScope))
+	if s == "session" {
+		return "session"
+	}
+	return "global" // default
 }
 
 // ServeHTTP handles POST /v1/chat/completions.
@@ -83,19 +102,48 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		prompt = extraSystem + "\n\n" + prompt
 	}
 
-	model := body.Model
-	if model == "" {
-		model = "picoclaw"
-	}
 	sessionKey := "openai:default"
 	if body.User != "" {
 		sessionKey = "openai:" + body.User
 	}
 
+	reqModel := strings.TrimSpace(body.Model)
+	var effectiveModel string
+	if h.modelScope() == "global" {
+		h.modelMu.Lock()
+		if reqModel != "" {
+			h.globalModel = reqModel
+		}
+		effectiveModel = reqModel
+		if effectiveModel == "" {
+			effectiveModel = h.globalModel
+		}
+		h.modelMu.Unlock()
+	} else {
+		h.modelMu.Lock()
+		if reqModel != "" {
+			h.sessionModel[sessionKey] = reqModel
+		}
+		effectiveModel = reqModel
+		if effectiveModel == "" {
+			effectiveModel = h.sessionModel[sessionKey]
+		}
+		h.modelMu.Unlock()
+	}
+
+	// Response echo: prefer request model, then stored, then default label.
+	modelEcho := reqModel
+	if modelEcho == "" {
+		modelEcho = effectiveModel
+	}
+	if modelEcho == "" {
+		modelEcho = "picoclaw"
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	response, err := h.agentLoop.ProcessDirect(ctx, prompt, sessionKey)
+	response, err := h.agentLoop.ProcessDirectWithModelName(ctx, prompt, sessionKey, effectiveModel)
 	if err != nil {
 		sendError(w, http.StatusInternalServerError, "api_error", err.Error())
 		return
@@ -108,7 +156,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ID:      id,
 		Object:  "chat.completion",
 		Created: created,
-		Model:   model,
+		Model:   modelEcho,
 		Choices: []choice{
 			{
 				Index: 0,

@@ -457,6 +457,8 @@ func (c *ModelConfig) Validate() error {
 type GatewayOpenAIAPIConfig struct {
 	Enabled      bool     `json:"enabled" env:"PICOCLAW_GATEWAY_OPENAI_API_ENABLED"`
 	BearerTokens []string `json:"bearer_tokens" env:"PICOCLAW_GATEWAY_OPENAI_API_BEARER_TOKENS"`
+	// ModelScope: "global" = single stored model for all requests (like /switch model); "session" = per-session stored model (each openai:user has its own). Default "global".
+	ModelScope string `json:"model_scope,omitempty" env:"PICOCLAW_GATEWAY_OPENAI_API_MODEL_SCOPE"`
 }
 
 type GatewayConfig struct {

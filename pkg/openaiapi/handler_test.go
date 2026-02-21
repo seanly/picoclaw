@@ -28,6 +28,10 @@ func (m *mockAgent) ProcessDirect(ctx context.Context, content, sessionKey strin
 	return m.response, nil
 }
 
+func (m *mockAgent) ProcessDirectWithModelName(ctx context.Context, content, sessionKey, modelName string) (string, error) {
+	return m.ProcessDirect(ctx, content, sessionKey)
+}
+
 func TestHandler_Unauthorized(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIAPI.Enabled = true

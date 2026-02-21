@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -111,4 +112,21 @@ func (r *AgentRegistry) GetDefaultAgent() *AgentInstance {
 		return agent
 	}
 	return nil
+}
+
+// GetAgentByModelName returns the agent whose primary model equals modelName (from model_list).
+// If no agent uses that model, returns (nil, false); caller should fall back to GetDefaultAgent().
+func (r *AgentRegistry) GetAgentByModelName(modelName string) (*AgentInstance, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	key := strings.TrimSpace(modelName)
+	if key == "" {
+		return nil, false
+	}
+	for _, agent := range r.agents {
+		if agent.Model == key {
+			return agent, true
+		}
+	}
+	return nil, false
 }

@@ -56,6 +56,7 @@ type processOptions struct {
 	EnableSummary   bool   // Whether to trigger summarization
 	SendResponse    bool   // Whether to send response via bus
 	NoHistory       bool   // If true, don't load session history (for heartbeat)
+	ModelOverride   string // If set, use this model_name (from model_list) for this request instead of agent.Model
 }
 
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
@@ -247,6 +248,26 @@ func (al *AgentLoop) ProcessDirect(ctx context.Context, content, sessionKey stri
 	return al.ProcessDirectWithChannel(ctx, content, sessionKey, "cli", "direct")
 }
 
+// ProcessDirectWithModelName is like ProcessDirect but selects the backend model by model_name (from model_list).
+// If modelName is empty, behavior is the same as ProcessDirect (default agent). Otherwise the backend uses
+// an agent that has that model, or the default agent with a one-request model override if the model is in model_list.
+func (al *AgentLoop) ProcessDirectWithModelName(ctx context.Context, content, sessionKey, modelName string) (string, error) {
+	msg := bus.InboundMessage{
+		Channel:    "cli",
+		SenderID:   "cron",
+		ChatID:     "direct",
+		Content:    content,
+		SessionKey: sessionKey,
+	}
+	if strings.TrimSpace(modelName) != "" {
+		if msg.Metadata == nil {
+			msg.Metadata = make(map[string]string)
+		}
+		msg.Metadata["model_name"] = strings.TrimSpace(modelName)
+	}
+	return al.processMessage(ctx, msg)
+}
+
 func (al *AgentLoop) ProcessDirectWithChannel(
 	ctx context.Context,
 	content, sessionKey, channel, chatID string,
@@ -325,6 +346,19 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		sessionKey = msg.SessionKey
 	}
 
+	var modelOverride string
+	if msg.Metadata != nil && strings.TrimSpace(msg.Metadata["model_name"]) != "" {
+		reqModel := strings.TrimSpace(msg.Metadata["model_name"])
+		if a, ok := al.registry.GetAgentByModelName(reqModel); ok {
+			agent = a
+			logger.InfoCF("agent", "Using agent by model_name", map[string]any{"model_name": reqModel, "agent_id": agent.ID})
+		} else if _, err := al.cfg.GetModelConfig(reqModel); err == nil {
+			agent = al.registry.GetDefaultAgent()
+			modelOverride = reqModel
+			logger.InfoCF("agent", "Using default agent with model override", map[string]any{"model_name": reqModel})
+		}
+	}
+
 	logger.InfoCF("agent", "Routed message",
 		map[string]any{
 			"agent_id":    agent.ID,
@@ -340,6 +374,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   true,
 		SendResponse:    false,
+		ModelOverride:   modelOverride,
 	})
 }
 
@@ -554,6 +589,11 @@ func (al *AgentLoop) runLLMIteration(
 	messages []providers.Message,
 	opts processOptions,
 ) (string, int, error) {
+	modelForCall := agent.Model
+	if opts.ModelOverride != "" {
+		modelForCall = opts.ModelOverride
+	}
+
 	iteration := 0
 	var finalContent string
 
@@ -575,7 +615,7 @@ func (al *AgentLoop) runLLMIteration(
 			map[string]any{
 				"agent_id":          agent.ID,
 				"iteration":         iteration,
-				"model":             agent.Model,
+				"model":             modelForCall,
 				"messages_count":    len(messages),
 				"tools_count":       len(providerToolDefs),
 				"max_tokens":        agent.MaxTokens,
@@ -599,7 +639,7 @@ func (al *AgentLoop) runLLMIteration(
 			reqEv := observe.LLMRequestEvent{
 				Common:             observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
 				Iteration:          iteration,
-				Model:              agent.Model,
+				Model:              modelForCall,
 				MessagesCount:      len(messages),
 				SystemPromptLength: systemPromptLen,
 				ToolsCount:         len(providerToolDefs),
@@ -612,12 +652,12 @@ func (al *AgentLoop) runLLMIteration(
 			al.observer.OnLLMRequest(reqEv)
 		}
 
-		// Call LLM with fallback chain if candidates are configured.
+		// Call LLM with fallback chain if candidates are configured (skip fallback when model override is set).
 		var response *providers.LLMResponse
 		var err error
 
 		callLLM := func() (*providers.LLMResponse, error) {
-			if len(agent.Candidates) > 1 && al.fallback != nil {
+			if opts.ModelOverride == "" && len(agent.Candidates) > 1 && al.fallback != nil {
 				fbResult, fbErr := al.fallback.Execute(ctx, agent.Candidates,
 					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
 						return agent.Provider.Chat(ctx, messages, providerToolDefs, model, map[string]any{
@@ -636,7 +676,7 @@ func (al *AgentLoop) runLLMIteration(
 				}
 				return fbResult.Response, nil
 			}
-			return agent.Provider.Chat(ctx, messages, providerToolDefs, agent.Model, map[string]any{
+			return agent.Provider.Chat(ctx, messages, providerToolDefs, modelForCall, map[string]any{
 				"max_tokens":  agent.MaxTokens,
 				"temperature": agent.Temperature,
 			})
