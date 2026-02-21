@@ -186,14 +186,16 @@ func (ms *MemoryStore) GetRecentDailyNotes(days int) string {
 	return sb.String()
 }
 
-// memoryChunk is a scored segment of memory content.
+// memoryChunk is a scored segment of memory content. index is the position in file (0 = oldest).
 type memoryChunk struct {
 	text  string
 	score int
+	index int
 }
 
 // Retrieve returns memory content relevant to the query (lightweight: keyword/paragraph match).
 // Splits MEMORY.md by ## or double newline, scores chunks by keyword overlap, returns top limit.
+// When scores are equal, prefers chunks that appear later in the file (more recent / corrections).
 // If limit <= 0, defaults to 10.
 func (ms *MemoryStore) Retrieve(query string, limit int) (string, error) {
 	if limit <= 0 {
@@ -211,16 +213,19 @@ func (ms *MemoryStore) Retrieve(query string, limit int) (string, error) {
 	}
 	queryLower := strings.ToLower(query)
 	queryWords := tokenizeForMatch(queryLower)
+	n := len(rawChunks)
 	var chunks []memoryChunk
-	for _, text := range rawChunks {
+	for i, text := range rawChunks {
 		text = strings.TrimSpace(text)
 		if text == "" {
 			continue
 		}
 		score := scoreChunk(text, queryLower, queryWords)
-		chunks = append(chunks, memoryChunk{text: text, score: score})
+		// Tie-break by index (later in file = more recent); primary sort remains by score
+		effectiveScore := score*(n+1) + i
+		chunks = append(chunks, memoryChunk{text: text, score: effectiveScore, index: i})
 	}
-	// Sort by score desc (simple bubble for small n)
+	// Sort by effective score desc (keyword score first, then position in file)
 	for i := 0; i < len(chunks); i++ {
 		for j := i + 1; j < len(chunks); j++ {
 			if chunks[j].score > chunks[i].score {
@@ -276,7 +281,32 @@ func tokenizeForMatch(s string) []string {
 			words = append(words, w)
 		}
 	}
+	// For CJK / non-Latin queries, Latin tokenization yields nothing; use rune bigrams so
+	// e.g. "我的咖啡口味" contributes "咖啡","口味" and can match stored memory.
+	if len(words) == 0 {
+		words = extractRuneBigrams(s)
+	}
 	return words
+}
+
+// extractRuneBigrams returns 2-rune substrings for scoring (e.g. "咖啡" from "我的咖啡口味").
+func extractRuneBigrams(s string) []string {
+	var runes []rune
+	for _, r := range s {
+		if r != ' ' && r != '\t' && r != '?' && r != '？' && r != '。' && r != '.' {
+			runes = append(runes, r)
+		}
+	}
+	var out []string
+	seen := make(map[string]bool)
+	for i := 0; i+1 < len(runes); i++ {
+		bigram := string(runes[i : i+2])
+		if !seen[bigram] {
+			seen[bigram] = true
+			out = append(out, bigram)
+		}
+	}
+	return out
 }
 
 func scoreChunk(chunkText, queryLower string, queryWords []string) int {

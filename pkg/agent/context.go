@@ -105,7 +105,9 @@ Your workspace is at: %s
 
 2. **Be helpful and accurate** - When using tools, briefly explain what you're doing.
 
-3. **Memory** - When interacting with me if something seems memorable, update %s/memory/MEMORY.md`,
+3. **Memory** - When something is memorable (new fact, preference, or correction), you MUST call the **memory_append** tool in the same turn. Do not only say "我会更新" or "I'll remember"—actually call memory_append. This includes when the user corrects a fact (e.g. "不是，是黑咖啡"): call memory_append with the corrected content so it is written to %s/memory/MEMORY.md. When correcting, use the same key terms as the original fact (e.g. "用户喜欢的咖啡口味：黑咖啡") so retrieval prefers the latest entry.
+
+4. **Memory over session** - When the **Long-term Memory** section (above) and the **current session** history disagree on a user fact or preference (e.g. coffee taste, name), treat **Long-term Memory** as the source of truth. The user may have corrected it in another chat or earlier; do not repeat the outdated version from the session.`,
 		now, runtime, workspacePath, workspacePath, workspacePath, workspacePath, toolsSection, workspacePath)
 }
 

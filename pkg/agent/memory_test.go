@@ -49,6 +49,53 @@ func TestMemoryStore_Retrieve_keywordMatch(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_Retrieve_cjkQuery(t *testing.T) {
+	dir := t.TempDir()
+	memDir := filepath.Join(dir, "memory")
+	os.MkdirAll(memDir, 0755)
+	memFile := filepath.Join(memDir, "MEMORY.md")
+	content := "用户喜欢的咖啡口味：燕麦拿铁"
+	if err := os.WriteFile(memFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ms := NewMemoryStore(dir)
+
+	out, err := ms.Retrieve("我的咖啡口味是啥？", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "咖啡") || !strings.Contains(out, "燕麦拿铁") {
+		t.Errorf("expected 咖啡 and 燕麦拿铁 in output for CJK query, got %q", out)
+	}
+}
+
+// TestMemoryStore_Retrieve_preferRecentWhenTied ensures that when two chunks match
+// the query equally (e.g. old fact + correction), the one later in the file is returned first.
+func TestMemoryStore_Retrieve_preferRecentWhenTied(t *testing.T) {
+	dir := t.TempDir()
+	memDir := filepath.Join(dir, "memory")
+	os.MkdirAll(memDir, 0755)
+	memFile := filepath.Join(memDir, "MEMORY.md")
+	// Two entries with same keyword overlap so scores tie; correction is second
+	content := "# Long-term Memory\n\n## 2026-02-21\n\n用户喜欢的咖啡口味：燕麦拿铁\n\n## 2026-02-21\n\n用户喜欢的咖啡口味：黑咖啡（已更正）。"
+	if err := os.WriteFile(memFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ms := NewMemoryStore(dir)
+
+	out, err := ms.Retrieve("我喜欢的咖啡口味", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// When scores tie, later in file wins → correction (黑咖啡) first
+	if !strings.Contains(out, "黑咖啡") {
+		t.Errorf("expected correction (黑咖啡) first when scores tie, got %q", out)
+	}
+	if strings.Contains(out, "燕麦拿铁") && !strings.Contains(out, "黑咖啡") {
+		t.Errorf("old fact (燕麦拿铁) must not be sole result when correction exists, got %q", out)
+	}
+}
+
 func TestMemoryStore_GetMemoryContext_emptyQuery_fallback(t *testing.T) {
 	dir := t.TempDir()
 	memDir := filepath.Join(dir, "memory")
