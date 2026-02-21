@@ -52,8 +52,6 @@ func skillsCmd() {
 		skillsInstallBuiltinCmd(workspace)
 	case "list-builtin":
 		skillsListBuiltinCmd()
-	case "search":
-		skillsSearchCmd(installer)
 	case "show":
 		if len(os.Args) < 4 {
 			fmt.Println("Usage: picoclaw skills show <skill-name>")
@@ -74,7 +72,6 @@ func skillsHelp() {
 	fmt.Println("  install-builtin          Install all builtin skills to workspace")
 	fmt.Println("  list-builtin             List available builtin skills")
 	fmt.Println("  remove <name>           Remove installed skill")
-	fmt.Println("  search                  Search available skills")
 	fmt.Println("  show <name>             Show skill details")
 	fmt.Println()
 	fmt.Println("Examples:")
@@ -248,39 +245,6 @@ func skillsListBuiltinCmd() {
 				fmt.Printf("     %s\n", description)
 			}
 		}
-	}
-}
-
-func skillsSearchCmd(installer *skills.SkillInstaller) {
-	fmt.Println("Searching for available skills...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	availableSkills, err := installer.ListAvailableSkills(ctx)
-	if err != nil {
-		fmt.Printf("✗ Failed to fetch skills list: %v\n", err)
-		return
-	}
-
-	if len(availableSkills) == 0 {
-		fmt.Println("No skills available.")
-		return
-	}
-
-	fmt.Printf("\nAvailable Skills (%d):\n", len(availableSkills))
-	fmt.Println("--------------------")
-	for _, skill := range availableSkills {
-		fmt.Printf("  📦 %s\n", skill.Name)
-		fmt.Printf("     %s\n", skill.Description)
-		fmt.Printf("     Repo: %s\n", skill.Repository)
-		if skill.Author != "" {
-			fmt.Printf("     Author: %s\n", skill.Author)
-		}
-		if len(skill.Tags) > 0 {
-			fmt.Printf("     Tags: %v\n", skill.Tags)
-		}
-		fmt.Println()
 	}
 }
 
