@@ -40,6 +40,8 @@ services:
     volumes:
       # Configuration file
       - ./config/config.json:/home/picoclaw/.picoclaw/config.json:ro
+      # OAuth credentials (qwen, openai, google-antigravity, etc.). Copy from ~/.picoclaw/auth.json if you use OAuth.
+      - ./config/auth.json:/home/picoclaw/.picoclaw/auth.json:ro
       # Persistent workspace (sessions, memory, logs)
       - picoclaw-workspace:/home/picoclaw/.picoclaw/workspace
     command: ["gateway"]

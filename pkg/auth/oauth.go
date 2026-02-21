@@ -21,13 +21,14 @@ import (
 )
 
 type OAuthProviderConfig struct {
-	Issuer       string
-	ClientID     string
-	ClientSecret string // Required for Google OAuth (confidential client)
-	TokenURL     string // Override token endpoint (Google uses a different URL than issuer)
-	Scopes       string
-	Originator   string
-	Port         int
+	Issuer         string
+	ClientID       string
+	ClientSecret   string // Required for Google OAuth (confidential client)
+	TokenURL       string // Override token endpoint (Google uses a different URL than issuer)
+	DeviceCodeURL  string // Optional: for RFC 8628 device code flow (e.g. Qwen)
+	Scopes         string
+	Originator     string
+	Port           int
 }
 
 func OpenAIOAuthConfig() OAuthProviderConfig {
@@ -55,6 +56,19 @@ func GoogleAntigravityOAuthConfig() OAuthProviderConfig {
 		ClientSecret: clientSecret,
 		Scopes:       "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs",
 		Port:         51121,
+	}
+}
+
+// QwenOAuthConfig returns the OAuth configuration for Qwen (qwen.ai account) device code flow.
+// You sign in with your qwen.ai account; the device code and token API endpoints are at
+// chat.qwen.ai (same as AIClient-2-API / Qwen Code ecosystem). Uses RFC 8628 device
+// authorization; no browser or redirect required on the machine running the CLI.
+func QwenOAuthConfig() OAuthProviderConfig {
+	return OAuthProviderConfig{
+		DeviceCodeURL: "https://chat.qwen.ai/api/v1/oauth2/device/code",
+		TokenURL:      "https://chat.qwen.ai/api/v1/oauth2/token",
+		ClientID:      "f0304373b74a44d2b584a3fb70ca9e56",
+		Scopes:        "openid profile email model.completion",
 	}
 }
 
@@ -231,6 +245,143 @@ func parseFlexibleInt(raw json.RawMessage) (int, error) {
 	return 0, fmt.Errorf("invalid integer value: %s", string(raw))
 }
 
+// qwenDeviceCodeResponse is the response from Qwen's device code endpoint (RFC 8628 style).
+type qwenDeviceCodeResponse struct {
+	DeviceCode             string `json:"device_code"`
+	UserCode               string `json:"user_code"`
+	VerificationURI        string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn              int    `json:"expires_in"`
+	Interval               int    `json:"interval"`
+}
+
+func parseQwenDeviceCodeResponse(body []byte) (qwenDeviceCodeResponse, error) {
+	var resp qwenDeviceCodeResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return qwenDeviceCodeResponse{}, err
+	}
+	if resp.DeviceCode == "" {
+		return qwenDeviceCodeResponse{}, fmt.Errorf("missing device_code in response")
+	}
+	if resp.VerificationURIComplete == "" && resp.VerificationURI == "" {
+		return qwenDeviceCodeResponse{}, fmt.Errorf("missing verification_uri in response")
+	}
+	if resp.Interval < 1 {
+		resp.Interval = 5
+	}
+	if resp.ExpiresIn < 1 {
+		resp.ExpiresIn = 300
+	}
+	return resp, nil
+}
+
+// pollQwenToken polls the Qwen token endpoint until the user completes authorization or timeout.
+func pollQwenToken(cfg OAuthProviderConfig, deviceCode, codeVerifier string, interval, expiresIn int) (*AuthCredential, error) {
+	data := url.Values{
+		"client_id":     {cfg.ClientID},
+		"device_code":   {deviceCode},
+		"grant_type":    {"urn:ietf:params:oauth:grant-type:device_code"},
+		"code_verifier": {codeVerifier},
+	}
+	resp, err := http.PostForm(cfg.TokenURL, data)
+	if err != nil {
+		return nil, fmt.Errorf("token request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusOK {
+		return parseTokenResponse(body, "qwen")
+	}
+
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &errResp)
+	switch errResp.Error {
+	case "authorization_pending", "slow_down":
+		return nil, fmt.Errorf("pending")
+	case "expired_token":
+		return nil, fmt.Errorf("device code expired, please run login again")
+	case "access_denied":
+		return nil, fmt.Errorf("user denied authorization")
+	default:
+		return nil, fmt.Errorf("pending")
+	}
+}
+
+// LoginQwenDeviceCode performs Qwen OAuth using the device code flow (RFC 8628).
+// No browser or redirect is required; the user opens a URL and enters a code.
+func LoginQwenDeviceCode() (*AuthCredential, error) {
+	cfg := QwenOAuthConfig()
+	if cfg.DeviceCodeURL == "" || cfg.TokenURL == "" {
+		return nil, fmt.Errorf("qwen device code URLs not configured")
+	}
+
+	pkce, err := GeneratePKCE()
+	if err != nil {
+		return nil, fmt.Errorf("generating PKCE: %w", err)
+	}
+
+	data := url.Values{
+		"client_id":             {cfg.ClientID},
+		"scope":                 {cfg.Scopes},
+		"code_challenge":        {pkce.CodeChallenge},
+		"code_challenge_method": {"S256"},
+	}
+	resp, err := http.PostForm(cfg.DeviceCodeURL, data)
+	if err != nil {
+		return nil, fmt.Errorf("requesting device code: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("device code request failed: %s", string(body))
+	}
+
+	devResp, err := parseQwenDeviceCodeResponse(body)
+	if err != nil {
+		return nil, err
+	}
+
+	verificationURL := devResp.VerificationURIComplete
+	if verificationURL == "" {
+		verificationURL = devResp.VerificationURI
+		if devResp.UserCode != "" {
+			verificationURL = verificationURL + "?user_code=" + url.QueryEscape(devResp.UserCode)
+		}
+	}
+
+	fmt.Printf("\nTo authenticate with Qwen, open this URL in your browser:\n\n  %s\n\n", verificationURL)
+	if devResp.UserCode != "" {
+		fmt.Printf("Then enter this code if prompted: %s\n\n", devResp.UserCode)
+	}
+	fmt.Println("Waiting for authentication...")
+
+	deadline := time.After(15 * time.Minute)
+	if devResp.ExpiresIn > 0 && devResp.ExpiresIn < 900 {
+		deadline = time.After(time.Duration(devResp.ExpiresIn) * time.Second)
+	}
+	ticker := time.NewTicker(time.Duration(devResp.Interval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			return nil, fmt.Errorf("device code authentication timed out")
+		case <-ticker.C:
+			cred, err := pollQwenToken(cfg, devResp.DeviceCode, pkce.CodeVerifier, devResp.Interval, devResp.ExpiresIn)
+			if err != nil {
+				if err.Error() == "pending" {
+					continue
+				}
+				return nil, err
+			}
+			return cred, nil
+		}
+	}
+}
+
 func LoginDeviceCode(cfg OAuthProviderConfig) (*AuthCredential, error) {
 	reqBody, _ := json.Marshal(map[string]string{
 		"client_id": cfg.ClientID,
@@ -326,11 +477,15 @@ func RefreshAccessToken(cred *AuthCredential, cfg OAuthProviderConfig) (*AuthCre
 		return nil, fmt.Errorf("no refresh token available")
 	}
 
+	scope := "openid profile email"
+	if cfg.Scopes != "" && strings.Contains(cfg.TokenURL, "qwen.ai") {
+		scope = cfg.Scopes
+	}
 	data := url.Values{
 		"client_id":     {cfg.ClientID},
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {cred.RefreshToken},
-		"scope":         {"openid profile email"},
+		"scope":         {scope},
 	}
 	if cfg.ClientSecret != "" {
 		data.Set("client_secret", cfg.ClientSecret)

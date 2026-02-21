@@ -17,7 +17,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-const supportedProvidersMsg = "Supported providers: openai, anthropic, google-antigravity"
+const supportedProvidersMsg = "Supported providers: openai, anthropic, google-antigravity, qwen"
 
 func authCmd() {
 	if len(os.Args) < 3 {
@@ -48,7 +48,7 @@ func authHelp() {
 	fmt.Println("  models      List available Antigravity models")
 	fmt.Println()
 	fmt.Println("Login options:")
-	fmt.Println("  --provider <name>    Provider to login with (openai, anthropic, google-antigravity)")
+	fmt.Println("  --provider <name>    Provider to login with (openai, anthropic, google-antigravity, qwen)")
 	fmt.Println("  --device-code        Use device code flow (for headless environments)")
 	fmt.Println()
 	fmt.Println("Examples:")
@@ -56,6 +56,7 @@ func authHelp() {
 	fmt.Println("  picoclaw auth login --provider openai --device-code")
 	fmt.Println("  picoclaw auth login --provider anthropic")
 	fmt.Println("  picoclaw auth login --provider google-antigravity")
+	fmt.Println("  picoclaw auth login --provider qwen")
 	fmt.Println("  picoclaw auth models")
 	fmt.Println("  picoclaw auth logout --provider openai")
 	fmt.Println("  picoclaw auth status")
@@ -91,6 +92,8 @@ func authLoginCmd() {
 		authLoginPasteToken(provider)
 	case "google-antigravity", "antigravity":
 		authLoginGoogleAntigravity()
+	case "qwen":
+		authLoginQwen()
 	default:
 		fmt.Printf("Unsupported provider: %s\n", provider)
 		fmt.Println(supportedProvidersMsg)
@@ -228,6 +231,22 @@ func authLoginGoogleAntigravity() {
 	fmt.Println("\n✓ Google Antigravity login successful!")
 	fmt.Println("Default model set to: gemini-flash")
 	fmt.Println("Try it: picoclaw agent -m \"Hello world\"")
+}
+
+func authLoginQwen() {
+	cred, err := auth.LoginQwenDeviceCode()
+	if err != nil {
+		fmt.Printf("Login failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err = auth.SetCredential("qwen", cred); err != nil {
+		fmt.Printf("Failed to save credentials: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Login successful!")
+	fmt.Println("Add a model with model \"qwen/<model-id>\" and \"auth_method\": \"oauth\" in model_list to use Qwen OAuth.")
 }
 
 func fetchGoogleUserEmail(accessToken string) (string, error) {

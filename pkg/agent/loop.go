@@ -1345,7 +1345,21 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 		}
 		switch args[0] {
 		case "models":
-			return "Available models: configured in config.json per agent", true
+			if al.cfg == nil || len(al.cfg.ModelList) == 0 {
+				return "No models in config (model_list is empty)", true
+			}
+			seen := make(map[string]bool)
+			var names []string
+			for _, m := range al.cfg.ModelList {
+				if m.ModelName != "" && !seen[m.ModelName] {
+					seen[m.ModelName] = true
+					names = append(names, m.ModelName)
+				}
+			}
+			if len(names) == 0 {
+				return "No models in config (model_list has no model_name)", true
+			}
+			return "Available models: " + strings.Join(names, ", "), true
 		case "channels":
 			if al.channelManager == nil {
 				return "Channel manager not initialized", true

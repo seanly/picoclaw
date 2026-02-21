@@ -36,6 +36,22 @@ func createCodexAuthProvider() (LLMProvider, error) {
 	return NewCodexProviderWithTokenSource(cred.AccessToken, cred.AccountID, createCodexTokenSource()), nil
 }
 
+// createQwenAuthProvider creates a Qwen provider using OAuth credentials from auth store.
+func createQwenAuthProvider(cfg *config.ModelConfig) (LLMProvider, error) {
+	cred, err := getCredential("qwen")
+	if err != nil {
+		return nil, fmt.Errorf("loading auth credentials: %w", err)
+	}
+	if cred == nil {
+		return nil, fmt.Errorf("no credentials for qwen. Run: picoclaw auth login --provider qwen")
+	}
+	apiBase := cfg.APIBase
+	if apiBase == "" {
+		apiBase = getDefaultAPIBase("qwen")
+	}
+	return NewHTTPProviderWithMaxTokensField(cred.AccessToken, apiBase, cfg.Proxy, cfg.MaxTokensField), nil
+}
+
 // ExtractProtocol extracts the protocol prefix and model identifier from a model string.
 // If no prefix is specified, it defaults to "openai".
 // Examples:
@@ -86,9 +102,28 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		}
 		return NewHTTPProviderWithMaxTokensField(cfg.APIKey, apiBase, cfg.Proxy, cfg.MaxTokensField), modelID, nil
 
+	case "qwen":
+		// Qwen with OAuth (device code flow)
+		if cfg.AuthMethod == "oauth" || cfg.AuthMethod == "token" {
+			provider, err := createQwenAuthProvider(cfg)
+			if err != nil {
+				return nil, "", err
+			}
+			return provider, modelID, nil
+		}
+		// Qwen with API key
+		if cfg.APIKey == "" && cfg.APIBase == "" {
+			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
+		}
+		apiBase := cfg.APIBase
+		if apiBase == "" {
+			apiBase = getDefaultAPIBase(protocol)
+		}
+		return NewHTTPProviderWithMaxTokensField(cfg.APIKey, apiBase, cfg.Proxy, cfg.MaxTokensField), modelID, nil
+
 	case "openrouter", "groq", "zhipu", "gemini", "nvidia",
 		"ollama", "moonshot", "shengsuanyun", "deepseek", "cerebras",
-		"volcengine", "vllm", "qwen":
+		"volcengine", "vllm":
 		// All other OpenAI-compatible HTTP providers
 		if cfg.APIKey == "" && cfg.APIBase == "" {
 			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
