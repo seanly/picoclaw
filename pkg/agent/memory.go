@@ -337,26 +337,3 @@ func (ms *MemoryStore) GetMemoryContext(query string, recentDays, retrieveLimit 
 	}
 	return result
 }
-
-	if longTerm == "" && recentNotes == "" {
-		return ""
-	}
-
-	var result string
-	for i, part := range parts {
-		if i > 0 {
-			result += "\n\n---\n\n"
-		}
-		result += part
-	}
-
-	if recentNotes != "" {
-		if longTerm != "" {
-			sb.WriteString("\n\n---\n\n")
-		}
-		sb.WriteString("## Recent Daily Notes\n\n")
-		sb.WriteString(recentNotes)
-	}
-
-	return sb.String()
-}
