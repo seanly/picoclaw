@@ -55,16 +55,11 @@ func agentCmd() {
 		os.Exit(1)
 	}
 
-	if modelOverride != "" {
-		cfg.Agents.Defaults.Model = modelOverride
-	}
-
 	provider, modelID, err := providers.CreateProvider(cfg)
 	if err != nil {
 		fmt.Printf("Error creating provider: %v\n", err)
 		os.Exit(1)
 	}
-	// Use the resolved model ID from provider creation
 	if modelID != "" {
 		cfg.Agents.Defaults.Model = modelID
 	}
@@ -83,7 +78,7 @@ func agentCmd() {
 
 	if message != "" {
 		ctx := context.Background()
-		response, err := agentLoop.ProcessDirect(ctx, message, sessionKey)
+		response, err := processWithModel(agentLoop, ctx, message, sessionKey, modelOverride)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -91,11 +86,19 @@ func agentCmd() {
 		fmt.Printf("\n%s %s\n", logo, response)
 	} else {
 		fmt.Printf("%s Interactive mode (Ctrl+C to exit)\n\n", logo)
-		interactiveMode(agentLoop, sessionKey)
+		interactiveMode(agentLoop, sessionKey, modelOverride)
 	}
 }
 
-func interactiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
+// processWithModel calls ProcessDirectWithModelName when modelName is set, else ProcessDirect (same style as OpenAI API).
+func processWithModel(agentLoop *agent.AgentLoop, ctx context.Context, content, sessionKey, modelName string) (string, error) {
+	if strings.TrimSpace(modelName) != "" {
+		return agentLoop.ProcessDirectWithModelName(ctx, content, sessionKey, strings.TrimSpace(modelName))
+	}
+	return agentLoop.ProcessDirect(ctx, content, sessionKey)
+}
+
+func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, modelOverride string) {
 	prompt := fmt.Sprintf("%s You: ", logo)
 
 	rl, err := readline.NewEx(&readline.Config{
@@ -108,7 +111,7 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
 	if err != nil {
 		fmt.Printf("Error initializing readline: %v\n", err)
 		fmt.Println("Falling back to simple input mode...")
-		simpleInteractiveMode(agentLoop, sessionKey)
+		simpleInteractiveMode(agentLoop, sessionKey, modelOverride)
 		return
 	}
 	defer rl.Close()
@@ -135,7 +138,7 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
 		}
 
 		ctx := context.Background()
-		response, err := agentLoop.ProcessDirect(ctx, input, sessionKey)
+		response, err := processWithModel(agentLoop, ctx, input, sessionKey, modelOverride)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
@@ -145,10 +148,10 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
 	}
 }
 
-func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
+func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey, modelOverride string) {
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print(fmt.Sprintf("%s You: ", logo))
+		fmt.Printf("%s You: ", logo)
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
@@ -170,7 +173,7 @@ func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
 		}
 
 		ctx := context.Background()
-		response, err := agentLoop.ProcessDirect(ctx, input, sessionKey)
+		response, err := processWithModel(agentLoop, ctx, input, sessionKey, modelOverride)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue

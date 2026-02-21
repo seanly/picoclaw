@@ -41,7 +41,7 @@ In your config file (e.g. `~/.picoclaw/config.json`), under `gateway`, set `open
 
 Supported fields: `model` (optional; use a **model_name** from your config’s `model_list`, e.g. `qwen3-coder-plus`), `messages` (required), `stream` (optional; if `true`, the server returns 501 Not Implemented for now), `user` (optional; used for session key).
 
-**Model used**: Depends on **model_scope** in config. With `model_scope: "global"` (default), one model is shared for all requests: any request with `model` updates it, and requests without `model` use this global value (like `/switch model`). With `model_scope: "session"`, the first request in a session that includes a `model` sets that model for that session; later requests in the same session without `model` use the stored one. If no model is stored and the request omits `model`, the default agent is used. The response always echoes the model used for that request.
+**Model used**: Depends on **model_scope** in config. With `model_scope: "global"` (default), one model is shared for all requests: any request with `model` updates it, and requests without `model` use this global value (like `/switch model`). With `model_scope: "session"`, the first request in a session that includes a `model` sets that model for that session; later requests in the same session without `model` use the stored one. If no model is stored and the request omits `model`, the default agent is used. The response always echoes the model used for that request. The same **model_name** (from `model_list`) selection is used by the CLI: `picoclaw agent --model <model_name>` uses that model for the run without changing config.
 
 ## Example
 
