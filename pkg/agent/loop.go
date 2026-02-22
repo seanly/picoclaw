@@ -23,10 +23,12 @@ import (
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
+	"github.com/sipeed/picoclaw/pkg/hookpolicy"
+	"github.com/sipeed/picoclaw/pkg/hooks"
+	"github.com/sipeed/picoclaw/pkg/hooks/builtin"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
-	"github.com/sipeed/picoclaw/pkg/agent/observe"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -43,7 +45,10 @@ type AgentLoop struct {
 	reflectAt      sync.Map // sessionKey -> last message count when reflection ran
 	fallback       *providers.FallbackChain
 	channelManager *channels.Manager
-	observer       observe.Observer // optional; set when config observation enabled
+	hooks          *hooks.Dispatcher
+	hookAuditPath  string
+	turnCounter    uint64
+	promptAuditFull bool // when true, pass full content in hook Context for prompt/conversation audit
 }
 
 // processOptions configures how a message is processed
@@ -51,6 +56,7 @@ type processOptions struct {
 	SessionKey      string // Session identifier for history/context
 	Channel         string // Target channel for tool execution
 	ChatID          string // Target chat ID for tool execution
+	TurnID          string // Deterministic turn identifier for audit and hooks
 	UserMessage     string // User message content (may include prefix)
 	DefaultResponse string // Response when LLM returns empty
 	EnableSummary   bool   // Whether to trigger summarization
@@ -76,20 +82,75 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		stateManager = state.NewManager(defaultAgent.Workspace)
 	}
 
-	var obs observe.Observer
-	if dir := cfg.ObservationDir(); dir != "" {
-		includeFull := cfg.Observation != nil && cfg.Observation.IncludeFullPrompt
-		obs = observe.NewFileObserver(dir, includeFull)
+	var hookDispatcher *hooks.Dispatcher
+	hookAuditPath := ""
+	promptAuditFull := cfg.PromptAuditEnabled() && cfg.PromptAuditIncludeFull()
+	if cfg.HooksEnabled() && defaultAgent != nil {
+		hookPolicy, hookDiag, hookPolicyErr := hookpolicy.LoadPolicy(defaultAgent.Workspace)
+		if hookPolicyErr != nil {
+			logger.WarnCF("hooks", "Failed to load hook policy, using defaults", map[string]interface{}{"error": hookPolicyErr.Error()})
+		}
+		for _, warning := range hookDiag.Warnings {
+			logger.WarnCF("hooks", "Hook policy warning", map[string]interface{}{"warning": warning})
+		}
+		var auditSink hooks.AuditSink
+		if hookPolicy.AuditEnabled || hookPolicyErr != nil {
+			auditPath := filepath.Join(defaultAgent.Workspace, "hooks", "hook-events.jsonl")
+			if hookPolicyErr == nil && hookPolicy.AuditPath != "" {
+				auditPath = hookPolicy.AuditPath
+			}
+			sink, err := hooks.NewJSONLAuditSinkAt(auditPath)
+			if err != nil {
+				logger.WarnCF("hooks", "Hook audit sink disabled", map[string]interface{}{"error": err.Error()})
+			} else {
+				auditSink = sink
+				hookAuditPath = sink.Path()
+			}
+		}
+		hookDispatcher = hooks.NewDispatcher(auditSink)
+		if hookPolicy.Enabled || hookPolicyErr != nil {
+			provenanceHandler := &builtin.ProvenanceHandler{}
+			policyHandler := builtin.NewPolicyHandler("")
+			if hookPolicyErr != nil {
+				for _, ev := range hooks.KnownEvents() {
+					hookDispatcher.Register(ev, provenanceHandler)
+					hookDispatcher.Register(ev, policyHandler)
+				}
+			} else {
+				for _, ev := range hooks.KnownEvents() {
+					ep := hookPolicy.Events[ev]
+					if !ep.Enabled {
+						continue
+					}
+					hookDispatcher.Register(ev, provenanceHandler)
+					hookDispatcher.Register(ev, policyHandler)
+				}
+			}
+		}
+		if cfg.PromptAuditEnabled() {
+			promptPath := cfg.PromptAuditPath(defaultAgent.Workspace)
+			if promptPath != "" {
+				if promptHandler, err := builtin.NewPromptAuditHandler(promptPath); err != nil {
+					logger.WarnCF("hooks", "Prompt audit handler disabled", map[string]interface{}{"error": err.Error()})
+				} else {
+					for _, ev := range hooks.KnownEvents() {
+						hookDispatcher.Register(ev, promptHandler)
+					}
+				}
+			}
+		}
 	}
 
 	return &AgentLoop{
-		bus:         msgBus,
-		cfg:         cfg,
-		registry:    registry,
-		state:       stateManager,
-		summarizing: sync.Map{},
-		fallback:    fallbackChain,
-		observer:    obs,
+		bus:             msgBus,
+		cfg:             cfg,
+		registry:        registry,
+		state:           stateManager,
+		summarizing:     sync.Map{},
+		fallback:        fallbackChain,
+		hooks:           hookDispatcher,
+		hookAuditPath:   hookAuditPath,
+		promptAuditFull: promptAuditFull,
 	}
 }
 
@@ -436,6 +497,9 @@ func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMe
 
 // runAgentLoop is the core message processing logic.
 func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opts processOptions) (string, error) {
+	if opts.TurnID == "" {
+		opts.TurnID = al.nextTurnID()
+	}
 	// 0. Record last channel for heartbeat notifications (skip internal channels)
 	if opts.Channel != "" && opts.ChatID != "" {
 		// Don't record internal channels (cli, system, subagent)
@@ -449,6 +513,21 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 
 	// 1. Update tool contexts
 	al.updateToolContexts(agent, opts.Channel, opts.ChatID)
+	beforeTurnCtx := hooks.Context{
+		Timestamp:   time.Now(),
+		TurnID:      opts.TurnID,
+		SessionKey:  opts.SessionKey,
+		Channel:     opts.Channel,
+		ChatID:      opts.ChatID,
+		Model:       agent.Model,
+		UserMessage: sanitizeHookText(opts.UserMessage),
+		Workspace:   agent.Workspace,
+		Metadata:   map[string]any{"agent_id": agent.ID},
+	}
+	if al.promptAuditFull {
+		beforeTurnCtx.FullUserMessage = opts.UserMessage
+	}
+	al.dispatchHook(ctx, hooks.EventBeforeTurn, beforeTurnCtx)
 
 	// 2. Build messages (skip history for heartbeat)
 	var history []providers.Message
@@ -468,25 +547,6 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		}
 	}
 
-	sessionMode := "full"
-	relevantLimit, fallbackKeep := 0, 8
-	if !opts.NoHistory && agent.MemoryPolicy != nil && agent.MemoryPolicy.SessionRelevantHistoryLimit() > 0 {
-		relevantLimit = agent.MemoryPolicy.SessionRelevantHistoryLimit()
-		fallbackKeep = agent.MemoryPolicy.SessionRelevantFallbackKeep()
-		sessionMode = "relevant"
-	}
-	if al.observer != nil {
-		al.observer.OnTurnStart(observe.TurnStartEvent{
-			Common:        observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
-			UserMessage:   opts.UserMessage,
-			SessionMode:   sessionMode,
-			HistoryCount:  len(history),
-			SummaryLength: len(summary),
-			RelevantLimit: relevantLimit,
-			FallbackKeep:  fallbackKeep,
-		})
-	}
-
 	messages := agent.ContextBuilder.BuildMessages(
 		history,
 		summary,
@@ -496,35 +556,24 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		opts.ChatID,
 	)
 
-	// Observation: memory used for this turn (same params as in BuildSystemPrompt)
-	if al.observer != nil {
-		recentDays, retrieveLimit := DefaultRecentDays, DefaultRetrieveLimit
-		if agent.MemoryPolicy != nil {
-			recentDays = agent.MemoryPolicy.RecentDays()
-			retrieveLimit = agent.MemoryPolicy.RetrieveLimit()
-		}
-		memoryContext := agent.ContextBuilder.GetMemoryStore().GetMemoryContext(opts.UserMessage, recentDays, retrieveLimit)
-		memorySource := "full"
-		if opts.UserMessage != "" {
-			memorySource = "retrieve"
-		}
-		al.observer.OnMemoryUsed(observe.MemoryUsedEvent{
-			Common:                observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
-			MemoryQuery:           opts.UserMessage,
-			RecentDays:            recentDays,
-			RetrieveLimit:         retrieveLimit,
-			MemorySource:          memorySource,
-			MemoryContextLength:   len(memoryContext),
-			MemoryContextPreview:  memoryContext,
-		})
-	}
-
 	// 3. Save user message to session
 	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 
 	// 4. Run LLM iteration loop
 	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)
 	if err != nil {
+		al.dispatchHook(ctx, hooks.EventOnError, hooks.Context{
+			Timestamp:    time.Now(),
+			TurnID:       opts.TurnID,
+			SessionKey:   opts.SessionKey,
+			Channel:      opts.Channel,
+			ChatID:       opts.ChatID,
+			Model:        agent.Model,
+			UserMessage:  sanitizeHookText(opts.UserMessage),
+			ErrorMessage: sanitizeHookText(err.Error()),
+			Workspace:    agent.Workspace,
+			Metadata:     map[string]any{"phase": "llm_iteration", "agent_id": agent.ID},
+		})
 		return "", err
 	}
 
@@ -570,14 +619,22 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 			"final_length": len(finalContent),
 		})
 
-	if al.observer != nil {
-		al.observer.OnTurnEnd(observe.TurnEndEvent{
-			Common:               observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
-			FinalContentLength:   len(finalContent),
-			FinalContentPreview:  finalContent,
-			TotalIterations:      iteration,
-		})
+	afterTurnCtx := hooks.Context{
+		Timestamp:          time.Now(),
+		TurnID:             opts.TurnID,
+		SessionKey:         opts.SessionKey,
+		Channel:            opts.Channel,
+		ChatID:             opts.ChatID,
+		Model:              agent.Model,
+		UserMessage:        sanitizeHookText(opts.UserMessage),
+		LLMResponseSummary: sanitizeHookText(finalContent),
+		Workspace:          agent.Workspace,
+		Metadata:           map[string]any{"iterations": iteration, "agent_id": agent.ID},
 	}
+	if al.promptAuditFull {
+		afterTurnCtx.FullLLMResponseSummary = finalContent
+	}
+	al.dispatchHook(ctx, hooks.EventAfterTurn, afterTurnCtx)
 
 	return finalContent, nil
 }
@@ -631,26 +688,28 @@ func (al *AgentLoop) runLLMIteration(
 				"tools_json":    formatToolsForLog(providerToolDefs),
 			})
 
-		systemPromptLen := 0
-		if len(messages) > 0 {
-			systemPromptLen = len(messages[0].Content)
+		beforeLLMCtx := hooks.Context{
+			Timestamp:   time.Now(),
+			TurnID:      opts.TurnID,
+			SessionKey:  opts.SessionKey,
+			Channel:     opts.Channel,
+			ChatID:      opts.ChatID,
+			Model:       modelForCall,
+			UserMessage: sanitizeHookText(opts.UserMessage),
+			Workspace:   agent.Workspace,
+			Metadata: map[string]any{
+				"iteration":      iteration,
+				"messages_count": len(messages),
+				"tools_count":    len(providerToolDefs),
+				"agent_id":       agent.ID,
+			},
 		}
-		if al.observer != nil {
-			reqEv := observe.LLMRequestEvent{
-				Common:             observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
-				Iteration:          iteration,
-				Model:              modelForCall,
-				MessagesCount:      len(messages),
-				SystemPromptLength: systemPromptLen,
-				ToolsCount:         len(providerToolDefs),
+		if al.promptAuditFull {
+			if b, err := json.Marshal(messages); err == nil {
+				beforeLLMCtx.MessagesJSON = string(b)
 			}
-			if fo, ok := al.observer.(*observe.FileObserver); ok && fo.IncludeFullPrompt() {
-				if b, err := json.Marshal(messages); err == nil {
-					reqEv.MessagesJSON = string(b)
-				}
-			}
-			al.observer.OnLLMRequest(reqEv)
 		}
+		al.dispatchHook(ctx, hooks.EventBeforeLLM, beforeLLMCtx)
 
 		// Call LLM with fallback chain if candidates are configured (skip fallback when model override is set).
 		var response *providers.LLMResponse
@@ -732,23 +791,26 @@ func (al *AgentLoop) runLLMIteration(
 			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
 		}
 
-		if al.observer != nil {
-			toolSummaries := make([]observe.ToolCallSummary, 0, len(response.ToolCalls))
-			for _, tc := range response.ToolCalls {
-				argsPreview := ""
-				if tc.Function != nil {
-					argsPreview = utils.Truncate(tc.Function.Arguments, 300)
-				}
-				toolSummaries = append(toolSummaries, observe.ToolCallSummary{Name: tc.Name, ArgsPreview: argsPreview})
-			}
-			al.observer.OnLLMResponse(observe.LLMResponseEvent{
-				Common:          observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
-				Iteration:       iteration,
-				ContentLength:   len(response.Content),
-				ContentPreview:  response.Content,
-				ToolCalls:       toolSummaries,
-			})
+		afterLLMCtx := hooks.Context{
+			Timestamp:          time.Now(),
+			TurnID:             opts.TurnID,
+			SessionKey:         opts.SessionKey,
+			Channel:            opts.Channel,
+			ChatID:             opts.ChatID,
+			Model:              modelForCall,
+			UserMessage:        sanitizeHookText(opts.UserMessage),
+			LLMResponseSummary: sanitizeHookText(response.Content),
+			Workspace:          agent.Workspace,
+			Metadata: map[string]any{
+				"iteration":        iteration,
+				"tool_call_count":  len(response.ToolCalls),
+				"agent_id":         agent.ID,
+			},
 		}
+		if al.promptAuditFull {
+			afterLLMCtx.FullLLMResponseSummary = response.Content
+		}
+		al.dispatchHook(ctx, hooks.EventAfterLLM, afterLLMCtx)
 
 		// Check if no tool calls - we're done
 		if len(response.ToolCalls) == 0 {
@@ -822,6 +884,18 @@ func (al *AgentLoop) runLLMIteration(
 					"tool":      tc.Name,
 					"iteration": iteration,
 				})
+			al.dispatchHook(ctx, hooks.EventBeforeTool, hooks.Context{
+				Timestamp:  time.Now(),
+				TurnID:     opts.TurnID,
+				SessionKey: opts.SessionKey,
+				Channel:    opts.Channel,
+				ChatID:     opts.ChatID,
+				Model:      modelForCall,
+				ToolName:   tc.Name,
+				ToolArgs:   sanitizeHookArgs(tc.Arguments),
+				Workspace:  agent.Workspace,
+				Metadata:   map[string]any{"iteration": iteration, "agent_id": agent.ID},
+			})
 
 			// Create async callback for tools that implement AsyncTool
 			// NOTE: Following openclaw's design, async tools do NOT send results directly to users.
@@ -877,20 +951,48 @@ func (al *AgentLoop) runLLMIteration(
 
 			// Save tool result message to session
 			agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
-
-			errStr := ""
-			if toolResult.Err != nil {
-				errStr = toolResult.Err.Error()
-			}
-			if al.observer != nil {
-				al.observer.OnToolExecuted(observe.ToolExecutedEvent{
-					Common:               observe.Common{Ts: time.Now().UTC().Format(time.RFC3339), AgentID: agent.ID, SessionKey: opts.SessionKey, Channel: opts.Channel, ChatID: opts.ChatID},
-					ToolName:             tc.Name,
-					ArgsPreview:          argsPreview,
-					ResultForLLMLength:   len(contentForLLM),
-					Error:                errStr,
+			al.dispatchHook(ctx, hooks.EventAfterTool, hooks.Context{
+				Timestamp:  time.Now(),
+				TurnID:     opts.TurnID,
+				SessionKey: opts.SessionKey,
+				Channel:    opts.Channel,
+				ChatID:     opts.ChatID,
+				Model:      modelForCall,
+				ToolName:   tc.Name,
+				ToolArgs:   sanitizeHookArgs(tc.Arguments),
+				ToolResult: sanitizeHookText(contentForLLM),
+				Workspace:  agent.Workspace,
+				Metadata: map[string]any{
+					"iteration": iteration,
+					"is_error":  toolResult.IsError,
+					"async":     toolResult.Async,
+					"agent_id":  agent.ID,
+				},
+			})
+			if toolResult.IsError {
+				errMsg := contentForLLM
+				if errMsg == "" && toolResult.Err != nil {
+					errMsg = toolResult.Err.Error()
+				}
+				al.dispatchHook(ctx, hooks.EventOnError, hooks.Context{
+					Timestamp:    time.Now(),
+					TurnID:       opts.TurnID,
+					SessionKey:   opts.SessionKey,
+					Channel:      opts.Channel,
+					ChatID:       opts.ChatID,
+					Model:        modelForCall,
+					ToolName:     tc.Name,
+					ToolArgs:     sanitizeHookArgs(tc.Arguments),
+					ErrorMessage: sanitizeHookText(errMsg),
+					Workspace:    agent.Workspace,
+					Metadata: map[string]any{
+						"iteration": iteration,
+						"phase":     "tool_execution",
+						"agent_id":  agent.ID,
+					},
 				})
 			}
+
 		}
 	}
 
@@ -915,6 +1017,41 @@ func (al *AgentLoop) updateToolContexts(agent *AgentInstance, channel, chatID st
 			st.SetContext(channel, chatID)
 		}
 	}
+}
+
+func (al *AgentLoop) nextTurnID() string {
+	n := atomic.AddUint64(&al.turnCounter, 1)
+	return fmt.Sprintf("turn-%d-%d", time.Now().UnixNano(), n)
+}
+
+func (al *AgentLoop) dispatchHook(ctx context.Context, event hooks.Event, data hooks.Context) {
+	if al.hooks == nil {
+		return
+	}
+	al.hooks.Dispatch(ctx, event, data)
+}
+
+func sanitizeHookText(input string) string {
+	if input == "" {
+		return ""
+	}
+	flat := strings.ReplaceAll(input, "\n", " ")
+	return utils.Truncate(flat, 500)
+}
+
+func sanitizeHookArgs(args map[string]interface{}) map[string]any {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		if s, ok := v.(string); ok {
+			out[k] = utils.Truncate(strings.ReplaceAll(s, "\n", " "), 200)
+		} else {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // maybeSummarize triggers summarization if the session history exceeds thresholds.

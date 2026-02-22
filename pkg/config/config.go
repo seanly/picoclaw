@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -59,15 +60,22 @@ type Config struct {
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Devices   DevicesConfig   `json:"devices"`
 	Memory    *MemoryConfig   `json:"memory,omitempty"`
-	Observation *ObservationConfig `json:"observation,omitempty"`
+	Hooks     *HooksConfig   `json:"hooks,omitempty"`
 	mu        sync.RWMutex
 }
 
-// ObservationConfig configures the agent observability layer (prompts, responses, memory/session handling).
-type ObservationConfig struct {
+// HooksConfig configures the hooks system (audit, policy, prompt/conversation audit).
+type HooksConfig struct {
+	Enabled     bool                `json:"enabled,omitempty"`      // master switch; false = no dispatcher
+	AuditPath   string              `json:"audit_path,omitempty"`     // optional override for default audit file path
+	PromptAudit *PromptAuditConfig  `json:"prompt_audit,omitempty"`  // optional; for full conversation audit (e.g. system prompt optimization)
+}
+
+// PromptAuditConfig configures the prompt/conversation audit handler (replaces observation for full-prompt capture).
+type PromptAuditConfig struct {
 	Enabled           bool   `json:"enabled,omitempty"`
-	Path              string `json:"path,omitempty"`               // directory for JSONL output; empty = ~/.picoclaw/observe
-	IncludeFullPrompt bool   `json:"include_full_prompt,omitempty"` // if true, store full system+messages; else lengths/preview only
+	Path              string `json:"path,omitempty"`                // empty = workspace/hooks/prompt-audit.jsonl
+	IncludeFullPrompt bool   `json:"include_full_prompt,omitempty"` // if true, pass full messages and responses in hook Context
 }
 
 // MarshalJSON implements custom JSON marshaling for Config
@@ -75,10 +83,10 @@ type ObservationConfig struct {
 func (c Config) MarshalJSON() ([]byte, error) {
 	type Alias Config
 	aux := &struct {
-		Providers   *ProvidersConfig   `json:"providers,omitempty"`
-		Session     *SessionConfig     `json:"session,omitempty"`
-		Memory      *MemoryConfig      `json:"memory,omitempty"`
-		Observation *ObservationConfig `json:"observation,omitempty"`
+		Providers *ProvidersConfig `json:"providers,omitempty"`
+		Session   *SessionConfig   `json:"session,omitempty"`
+		Memory    *MemoryConfig    `json:"memory,omitempty"`
+		Hooks     *HooksConfig     `json:"hooks,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(&c),
@@ -99,8 +107,8 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		aux.Memory = c.Memory
 	}
 
-	if c.Observation != nil {
-		aux.Observation = c.Observation
+	if c.Hooks != nil {
+		aux.Hooks = c.Hooks
 	}
 
 	return json.Marshal(aux)
@@ -583,16 +591,43 @@ func (c *Config) WorkspacePath() string {
 	return expandHome(c.Agents.Defaults.Workspace)
 }
 
-// ObservationDir returns the directory for observation JSONL output, or "" if observation is disabled.
-func (c *Config) ObservationDir() string {
-	if c.Observation == nil || !c.Observation.Enabled {
+// HooksEnabled returns true if hooks are enabled (default true when Hooks is nil, so existing behavior is preserved).
+func (c *Config) HooksEnabled() bool {
+	if c.Hooks == nil {
+		return true
+	}
+	return c.Hooks.Enabled
+}
+
+// PromptAuditEnabled returns true if prompt_audit is enabled.
+func (c *Config) PromptAuditEnabled() bool {
+	if c.Hooks == nil || c.Hooks.PromptAudit == nil {
+		return false
+	}
+	return c.Hooks.PromptAudit.Enabled
+}
+
+// PromptAuditPath returns the path for prompt-audit JSONL; if empty in config, uses workspace/hooks/prompt-audit.jsonl.
+func (c *Config) PromptAuditPath(workspace string) string {
+	if c.Hooks == nil || c.Hooks.PromptAudit == nil {
 		return ""
 	}
-	p := c.Observation.Path
-	if p == "" {
-		p = "~/.picoclaw/observe"
+	p := strings.TrimSpace(c.Hooks.PromptAudit.Path)
+	if p != "" {
+		return expandHome(p)
 	}
-	return expandHome(p)
+	if workspace == "" {
+		return ""
+	}
+	return filepath.Join(workspace, "hooks", "prompt-audit.jsonl")
+}
+
+// PromptAuditIncludeFull returns true if full prompt/response content should be passed to hook Context.
+func (c *Config) PromptAuditIncludeFull() bool {
+	if c.Hooks == nil || c.Hooks.PromptAudit == nil {
+		return false
+	}
+	return c.Hooks.PromptAudit.IncludeFullPrompt
 }
 
 func (c *Config) GetAPIKey() string {

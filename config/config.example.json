@@ -261,10 +261,14 @@
     "long_term_compress_char_threshold": 0,
     "evolution_enabled": false
   },
-  "observation": {
-    "enabled": false,
-    "path": "",
-    "include_full_prompt": false
+  "hooks": {
+    "enabled": true,
+    "audit_path": "",
+    "prompt_audit": {
+      "enabled": false,
+      "path": "",
+      "include_full_prompt": false
+    }
   },
   "gateway": {
     "host": "0.0.0.0",

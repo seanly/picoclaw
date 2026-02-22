@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/providers/openai_compat"
 )
 
 // createClaudeAuthProvider creates a Claude provider using OAuth credentials from auth store.
@@ -37,6 +39,8 @@ func createCodexAuthProvider() (LLMProvider, error) {
 }
 
 // createQwenAuthProvider creates a Qwen provider using OAuth credentials from auth store.
+// It uses a token source that refreshes the access token when needed (e.g. before expiry or when idle);
+// with heartbeat enabled, periodic heartbeat calls keep the token refreshed.
 func createQwenAuthProvider(cfg *config.ModelConfig) (LLMProvider, error) {
 	cred, err := getCredential("qwen")
 	if err != nil {
@@ -49,7 +53,31 @@ func createQwenAuthProvider(cfg *config.ModelConfig) (LLMProvider, error) {
 	if apiBase == "" {
 		apiBase = getDefaultAPIBase("qwen")
 	}
-	return NewHTTPProviderWithMaxTokensField(cred.AccessToken, apiBase, cfg.Proxy, cfg.MaxTokensField), nil
+	tokenSource := openai_compat.TokenSource(func() (string, error) {
+		cred, err := getCredential("qwen")
+		if err != nil {
+			return "", fmt.Errorf("loading credentials: %w", err)
+		}
+		if cred == nil {
+			return "", fmt.Errorf("no credentials for qwen")
+		}
+		if cred.AuthMethod == "oauth" && cred.NeedsRefresh() && cred.RefreshToken != "" {
+			oauthCfg := auth.QwenOAuthConfig()
+			refreshed, err := auth.RefreshAccessToken(cred, oauthCfg)
+			if err != nil {
+				return "", fmt.Errorf("refreshing token: %w", err)
+			}
+			if refreshed.RefreshToken == "" {
+				refreshed.RefreshToken = cred.RefreshToken
+			}
+			if err := auth.SetCredential("qwen", refreshed); err != nil {
+				return "", fmt.Errorf("saving refreshed token: %w", err)
+			}
+			return refreshed.AccessToken, nil
+		}
+		return cred.AccessToken, nil
+	})
+	return NewHTTPProviderWithTokenSource(tokenSource, apiBase, cfg.Proxy, cfg.MaxTokensField), nil
 }
 
 // ExtractProtocol extracts the protocol prefix and model identifier from a model string.

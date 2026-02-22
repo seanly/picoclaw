@@ -28,6 +28,13 @@ func NewHTTPProviderWithMaxTokensField(apiKey, apiBase, proxy, maxTokensField st
 	}
 }
 
+// NewHTTPProviderWithTokenSource creates a provider that uses tokenSource for each request (e.g. OAuth refresh).
+func NewHTTPProviderWithTokenSource(tokenSource openai_compat.TokenSource, apiBase, proxy, maxTokensField string) *HTTPProvider {
+	return &HTTPProvider{
+		delegate: openai_compat.NewProviderWithMaxTokensFieldAndTokenSource(tokenSource, apiBase, proxy, maxTokensField),
+	}
+}
+
 func (p *HTTPProvider) Chat(
 	ctx context.Context,
 	messages []Message,

@@ -27,11 +27,15 @@ type (
 	GoogleExtra            = protocoltypes.GoogleExtra
 )
 
+// TokenSource returns a fresh API key/token for each request (e.g. for OAuth refresh).
+type TokenSource func() (string, error)
+
 type Provider struct {
 	apiKey         string
 	apiBase        string
 	maxTokensField string // Field name for max tokens (e.g., "max_completion_tokens" for o1/glm models)
 	httpClient     *http.Client
+	tokenSource    TokenSource // optional; when set, used per request instead of apiKey
 }
 
 func NewProvider(apiKey, apiBase, proxy string) *Provider {
@@ -59,6 +63,29 @@ func NewProviderWithMaxTokensField(apiKey, apiBase, proxy, maxTokensField string
 		apiBase:        strings.TrimRight(apiBase, "/"),
 		maxTokensField: maxTokensField,
 		httpClient:     client,
+	}
+}
+
+// NewProviderWithMaxTokensFieldAndTokenSource creates a provider that calls tokenSource for each request (e.g. to refresh OAuth tokens).
+func NewProviderWithMaxTokensFieldAndTokenSource(tokenSource TokenSource, apiBase, proxy, maxTokensField string) *Provider {
+	client := &http.Client{
+		Timeout: 120 * time.Second,
+	}
+	if proxy != "" {
+		parsed, err := url.Parse(proxy)
+		if err == nil {
+			client.Transport = &http.Transport{
+				Proxy: http.ProxyURL(parsed),
+			}
+		} else {
+			log.Printf("openai_compat: invalid proxy URL %q: %v", proxy, err)
+		}
+	}
+	return &Provider{
+		apiBase:        strings.TrimRight(apiBase, "/"),
+		maxTokensField: maxTokensField,
+		httpClient:     client,
+		tokenSource:    tokenSource,
 	}
 }
 
@@ -122,8 +149,16 @@ func (p *Provider) Chat(
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	apiKey := p.apiKey
+	if p.tokenSource != nil {
+		var err error
+		apiKey, err = p.tokenSource()
+		if err != nil {
+			return nil, fmt.Errorf("token source: %w", err)
+		}
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
 	resp, err := p.httpClient.Do(req)
